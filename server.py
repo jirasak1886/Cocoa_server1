@@ -203,23 +203,6 @@ def index():
     })
 
 
-@app.route('/api/auth/validate', methods=['GET'])
-@require_auth
-def validate_token():
-    """ตรวจสอบความถูกต้องของ token"""
-    user = request.current_user
-    return jsonify({
-        'success': True,
-        'authenticated': True,
-        'user': {
-            'user_id': user['user_id'],
-            'username': user['username'],
-            'name': user.get('name', '')
-        },
-        'token_expires': datetime.fromtimestamp(user['exp']).isoformat(),
-        'remaining_days': (datetime.fromtimestamp(user['exp']) - datetime.now()).days
-    })
-
 
 @app.route('/api/test/protected', methods=['GET'])
 @require_auth

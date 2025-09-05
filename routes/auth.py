@@ -6,41 +6,69 @@ from datetime import datetime, timedelta
 
 auth_bp = Blueprint('auth', __name__)
 
-# ==================== HELPER FUNCTIONS ====================
+# ==================== HELPER ====================
+def _add_cors(resp):
+    resp.headers.add('Access-Control-Allow-Origin', '*')
+    resp.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    resp.headers.add('Access-Control-Allow-Methods', 'POST, GET, PUT, DELETE, OPTIONS')
+    resp.headers.add('Access-Control-Allow-Credentials', 'true')
+    return resp
 
-def check_user_exists(username, user_tel):
-    """ตรวจสอบว่า username หรือเบอร์โทรมีอยู่แล้วหรือไม่"""
+def _preflight():
+    resp = jsonify({'status': 'OK'})
+    resp.status_code = 204
+    return _add_cors(resp)
+
+def _get_payload():
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return None
+    token = auth_header.split(' ')[1]
+    try:
+        return jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
+    except jwt.InvalidTokenError:
+        return None
+
+def _user_exists(username=None, user_tel=None, exclude_user_id=None):
+    """เช็คซ้ำ username หรือเบอร์ (ยกเว้น user_id ของตัวเองเวลาปรับปรุงโปรไฟล์)"""
     conn = get_db_connection()
-    if conn:
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT user_id FROM users WHERE username = %s OR user_tel = %s",
-                         (username, user_tel))
-            result = cursor.fetchone()
-            return result is not None
-        except Error as e:
-            current_app.logger.error(f"เกิดข้อผิดพลาด: {e}")
+    if not conn:
+        return False
+    try:
+        cursor = conn.cursor()
+        clauses, params = [], []
+        if username:
+            clauses.append("username = %s")
+            params.append(username)
+        if user_tel:
+            clauses.append("user_tel = %s")
+            params.append(user_tel)
+        if not clauses:
             return False
-        finally:
-            if conn.is_connected():
-                cursor.close()
-                conn.close()
-    return False
+        sql = "SELECT user_id FROM users WHERE (" + " OR ".join(clauses) + ")"
+        if exclude_user_id:
+            sql += " AND user_id <> %s"
+            params.append(exclude_user_id)
+        cursor.execute(sql, tuple(params))
+        return cursor.fetchone() is not None
+    finally:
+        if conn.is_connected():
+            cursor.close()
+            conn.close()
 
+# ==================== AUTH CORE ====================
 def authenticate_user(username, password):
-    """ตรวจสอบการเข้าสู่ระบบ"""
     conn = get_db_connection()
     if conn:
         try:
             cursor = conn.cursor(dictionary=True)
-            hashed_password = hash_password(password)
-            cursor.execute("SELECT user_id, username, name FROM users WHERE username = %s AND user_password = %s",
-                         (username, hashed_password))
-            result = cursor.fetchone()
-            return result
-        except Error as e:
-            current_app.logger.error(f"เกิดข้อผิดพลาด: {e}")
-            return None
+            hashed = hash_password(password)
+            cursor.execute("""
+                SELECT user_id, username, name, user_tel
+                FROM users
+                WHERE username = %s AND user_password = %s
+            """, (username, hashed))
+            return cursor.fetchone()
         finally:
             if conn.is_connected():
                 cursor.close()
@@ -48,16 +76,15 @@ def authenticate_user(username, password):
     return None
 
 def register_user(username, user_tel, password, name):
-    """ลงทะเบียนผู้ใช้ใหม่"""
     conn = get_db_connection()
     if conn:
         try:
             cursor = conn.cursor()
-            hashed_password = hash_password(password)
+            hashed = hash_password(password)
             cursor.execute("""
                 INSERT INTO users (username, user_tel, user_password, name)
                 VALUES (%s, %s, %s, %s)
-            """, (username, user_tel, hashed_password, name))
+            """, (username, user_tel, hashed, name))
             conn.commit()
             return cursor.lastrowid
         except Error as e:
@@ -71,369 +98,288 @@ def register_user(username, user_tel, password, name):
     return None
 
 def generate_token(user_data):
-    """สร้าง JWT token สำหรับผู้ใช้"""
+    now = datetime.utcnow()
     payload = {
         'user_id': user_data['user_id'],
         'username': user_data['username'],
         'name': user_data.get('name', ''),
-        'exp': datetime.utcnow() + timedelta(days=30),  # หมดอายุใน 30 วัน
-        'iat': datetime.utcnow()
+        'exp': now + timedelta(days=30),
+        'iat': now
     }
-    
-    token = jwt.encode(payload, current_app.config['JWT_SECRET_KEY'], algorithm='HS256')
-    return token
+    return jwt.encode(payload, current_app.config['JWT_SECRET_KEY'], algorithm='HS256')
 
-def add_cors_headers(response):
-    """เพิ่ม CORS headers"""
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'POST, GET, PUT, DELETE')
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
-    return response
-
-# ==================== AUTH ROUTES ====================
-
+# ==================== ROUTES ====================
 @auth_bp.route('/login', methods=['POST', 'OPTIONS'])
 def login():
-    """API: เข้าสู่ระบบ"""
-    
-    # Handle preflight request
     if request.method == 'OPTIONS':
-        response = jsonify({'status': 'OK'})
-        return add_cors_headers(response)
-    
+        return _preflight()
     try:
-        # รับข้อมูลจาก JSON หรือ Form
-        username = None
-        password = None
-        
-        if request.is_json:
-            data = request.get_json()
-            if data:
-                username = data.get('username')
-                password = data.get('password')
-        else:
-            username = request.form.get('username')
-            password = request.form.get('password')
+        data = request.get_json(silent=True) or request.form
+        username = (data.get('username') or '').strip()
+        password = (data.get('password') or '').strip()
 
         if not username or not password:
-            response = jsonify({
-                    'success': True,
-                'message': 'เข้าสู่ระบบสำเร็จ',
-                'token': token,  # ← ย้าย token มาที่ root level
-                'user': {        # ← ย้าย user มาที่ root level
-                    'user_id': user['user_id'],
-                    'username': user['username'],
-                    'name': user['name']
-                },
-                'expires_in_days': 30,
-                'data': {  # ← เก็บ data ไว้เพื่อ backward compatibility
-                    'user': {
-                        'user_id': user['user_id'],
-                        'username': user['username'],
-                        'name': user['name']
-                    },
-                    'token': token,
-                    'expires_in_days': 30
-                }
-            })
-            return add_cors_headers(response), 400
+            return _add_cors(jsonify({
+                'success': False,
+                'error': 'missing_fields',
+                'message': 'กรุณากรอกชื่อผู้ใช้และรหัสผ่าน'
+            })), 400
 
-        # ตรวจสอบการเข้าสู่ระบบ
         user = authenticate_user(username, password)
-        
-        if user:
-            # สร้าง JWT token
-            token = generate_token(user)
-            
-            current_app.logger.info(f"Login successful for user: {username}")
-            
-            response = jsonify({
-                'success': True,
-                'message': 'เข้าสู่ระบบสำเร็จ', 
-                'data': {
-                    'user': {
-                        'user_id': user['user_id'],
-                        'username': user['username'],
-                        'name': user['name']
-                    },
-                    'token': token,
-                    'expires_in_days': 30
-                }
-            })
-            return add_cors_headers(response), 200
-        else:
-            response = jsonify({
-                'success': False, 
+        if not user:
+            return _add_cors(jsonify({
+                'success': False,
                 'error': 'invalid_credentials',
                 'message': 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง'
-            })
-            return add_cors_headers(response), 401
-            
+            })), 401
+
+        token = generate_token(user)
+        current_app.logger.info(f"Login successful for user: {username}")
+        return _add_cors(jsonify({
+            'success': True,
+            'message': 'เข้าสู่ระบบสำเร็จ',
+            'user': {
+                'user_id': user['user_id'],
+                'username': user['username'],
+                'name': user.get('name', ''),
+                'user_tel': user.get('user_tel')
+            },
+            'token': token,
+            'expires_in_days': 30
+        })), 200
     except Exception as e:
         current_app.logger.error(f"Login error: {e}")
-        response = jsonify({
+        return _add_cors(jsonify({
             'success': False,
             'error': 'server_error',
             'message': 'เกิดข้อผิดพลาดในระบบ'
-        })
-        return add_cors_headers(response), 500
+        })), 500
 
 @auth_bp.route('/register', methods=['POST', 'OPTIONS'])
 def register():
-    """API: ลงทะเบียน"""
-    
-    # Handle preflight request
     if request.method == 'OPTIONS':
-        response = jsonify({'status': 'OK'})
-        return add_cors_headers(response)
-    
+        return _preflight()
     try:
-        current_app.logger.info(f"Register request from: {request.remote_addr}")
-        
-        # รับข้อมูลจาก JSON หรือ Form
-        username = None
-        user_tel = None
-        password = None
-        confirm_password = None
-        name = None
-        
-        if request.is_json:
-            data = request.get_json()
-            if data:
-                username = data.get('username')
-                user_tel = data.get('user_tel')
-                password = data.get('password')
-                confirm_password = data.get('confirm_password')
-                name = data.get('name')
-        else:
-            username = request.form.get('username')
-            user_tel = request.form.get('user_tel')
-            password = request.form.get('password')
-            confirm_password = request.form.get('confirm_password')
-            name = request.form.get('name')
-        
-        # Validation
-        if not all([username, user_tel, password, confirm_password, name]):
-            response = jsonify({
-                'success': False, 
+        data = request.get_json(silent=True) or request.form
+        username = (data.get('username') or '').strip()
+        user_tel = (data.get('user_tel') or '').strip()
+        password = (data.get('password') or '').strip()
+        confirm = (data.get('confirm_password') or '').strip()
+        name = (data.get('name') or '').strip()
+
+        if not all([username, user_tel, password, confirm, name]):
+            return _add_cors(jsonify({
+                'success': False,
                 'error': 'missing_fields',
                 'message': 'กรุณากรอกข้อมูลให้ครบทุกช่อง'
-            })
-            return add_cors_headers(response), 400
-        
-        # Clean input data
-        username = username.strip()
-        user_tel = user_tel.strip()
-        name = name.strip()
-        
-        # Additional validation
+            })), 400
         if len(username) < 3:
-            response = jsonify({
-                'success': False, 
-                'error': 'username_too_short',
-                'message': 'ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร'
-            })
-            return add_cors_headers(response), 400
-        
+            return _add_cors(jsonify({'success': False, 'error': 'username_too_short', 'message': 'ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร'})), 400
         if len(user_tel) < 10:
-            response = jsonify({
-                'success': False, 
-                'error': 'phone_invalid',
-                'message': 'เบอร์โทรศัพท์ไม่ถูกต้อง'
-            })
-            return add_cors_headers(response), 400
-        
-        if password != confirm_password:
-            response = jsonify({
-                'success': False, 
-                'error': 'password_mismatch',
-                'message': 'รหัสผ่านไม่ตรงกัน'
-            })
-            return add_cors_headers(response), 400
-        
+            return _add_cors(jsonify({'success': False, 'error': 'phone_invalid', 'message': 'เบอร์โทรศัพท์ไม่ถูกต้อง'})), 400
+        if password != confirm:
+            return _add_cors(jsonify({'success': False, 'error': 'password_mismatch', 'message': 'รหัสผ่านไม่ตรงกัน'})), 400
         if len(password) < 6:
-            response = jsonify({
-                'success': False, 
-                'error': 'password_too_short',
-                'message': 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'
-            })
-            return add_cors_headers(response), 400
-        
-        if check_user_exists(username, user_tel):
-            response = jsonify({
-                'success': False, 
-                'error': 'user_exists',
-                'message': 'ชื่อผู้ใช้หรือเบอร์โทรศัพท์นี้มีอยู่แล้ว'
-            })
-            return add_cors_headers(response), 409
-        
-        new_user_id = register_user(username, user_tel, password, name)
-        if new_user_id:
-            current_app.logger.info(f"Registration successful for user: {username}")
-            response = jsonify({
-                'success': True, 
-                'message': 'ลงทะเบียนสำเร็จ!',
-                'data': {
-                    'user_id': new_user_id,
-                    'username': username,
-                    'name': name
-                }
-            })
-            return add_cors_headers(response), 201
-        else:
-            response = jsonify({
-                'success': False, 
-                'error': 'registration_failed',
-                'message': 'เกิดข้อผิดพลาดในการลงทะเบียน'
-            })
-            return add_cors_headers(response), 500
-    
+            return _add_cors(jsonify({'success': False, 'error': 'password_too_short', 'message': 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'})), 400
+        if _user_exists(username=username, user_tel=user_tel):
+            return _add_cors(jsonify({'success': False, 'error': 'user_exists', 'message': 'ชื่อผู้ใช้หรือเบอร์โทรศัพท์นี้มีอยู่แล้ว'})), 409
+
+        new_id = register_user(username, user_tel, password, name)
+        if not new_id:
+            return _add_cors(jsonify({'success': False, 'error': 'registration_failed', 'message': 'เกิดข้อผิดพลาดในการลงทะเบียน'})), 500
+
+        return _add_cors(jsonify({
+            'success': True,
+            'message': 'ลงทะเบียนสำเร็จ!',
+            'data': {'user_id': new_id, 'username': username, 'name': name}
+        })), 201
     except Exception as e:
         current_app.logger.error(f"Registration error: {e}")
-        response = jsonify({
-            'success': False,
-            'error': 'server_error',
-            'message': 'เกิดข้อผิดพลาดในระบบ'
-        })
-        return add_cors_headers(response), 500
+        return _add_cors(jsonify({'success': False, 'error': 'server_error', 'message': 'เกิดข้อผิดพลาดในระบบ'})), 500
 
 @auth_bp.route('/logout', methods=['POST', 'OPTIONS'])
 def logout():
-    """API: ออกจากระบบ (แค่ลบ token ฝั่ง client)"""
-    
-    # Handle preflight request
     if request.method == 'OPTIONS':
-        response = jsonify({'status': 'OK'})
-        return add_cors_headers(response)
-    
-    try:
-        # สำหรับ JWT เราไม่ต้องทำอะไรฝั่งเซิร์ฟเวอร์
-        # ให้ client ลบ token เอง
-        current_app.logger.info("Logout request received")
-        
-        response = jsonify({
-            'success': True, 
-            'message': 'ออกจากระบบเรียบร้อยแล้ว'
-        })
-        return add_cors_headers(response), 200
-    
-    except Exception as e:
-        current_app.logger.error(f"Logout error: {e}")
-        response = jsonify({
-            'success': False,
-            'error': 'server_error',
-            'message': 'เกิดข้อผิดพลาดในการออกจากระบบ'
-        })
-        return add_cors_headers(response), 500
+        return _preflight()
+    return _add_cors(jsonify({'success': True, 'message': 'ออกจากระบบเรียบร้อยแล้ว'})), 200
 
 @auth_bp.route('/validate', methods=['GET', 'OPTIONS'])
-def validate_token():
-    """API: ตรวจสอบ token"""
-    
-    # Handle preflight request
+def validate():
     if request.method == 'OPTIONS':
-        response = jsonify({'status': 'OK'})
-        return add_cors_headers(response)
-    
+        return _preflight()
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '):
+        return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'missing_token', 'message': 'Token is required'})), 401
+    token = auth.split(' ')[1]
     try:
-        # ดึง token จาก Authorization header
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            response = jsonify({
-                'success': False,
-                'authenticated': False,
-                'error': 'missing_token',
-                'message': 'Token is required'
-            })
-            return add_cors_headers(response), 401
-        
-        token = auth_header.split(' ')[1]
-        
-        try:
-            # ตรวจสอบ token
-            payload = jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
-            
-            response = jsonify({
-                'success': True,
-                'authenticated': True,
-                'user': {
-                    'user_id': payload['user_id'],
-                    'username': payload['username'],
-                    'name': payload.get('name', '')
-                },
-                'token_expires': datetime.fromtimestamp(payload['exp']).isoformat()
-            })
-            return add_cors_headers(response), 200
-            
-        except jwt.ExpiredSignatureError:
-            response = jsonify({
-                'success': False,
-                'authenticated': False,
-                'error': 'token_expired',
-                'message': 'Token has expired'
-            })
-            return add_cors_headers(response), 401
-            
-        except jwt.InvalidTokenError:
-            response = jsonify({
-                'success': False,
-                'authenticated': False,
-                'error': 'invalid_token',
-                'message': 'Token is invalid'
-            })
-            return add_cors_headers(response), 401
-    
-    except Exception as e:
-        current_app.logger.error(f"Token validation error: {e}")
-        response = jsonify({
-            'success': False,
-            'authenticated': False,
-            'error': 'server_error',
-            'message': 'เกิดข้อผิดพลาดในการตรวจสอบ token'
-        })
-        return add_cors_headers(response), 500
-
-# ==================== TEST ENDPOINTS ====================
-
-@auth_bp.route('/test-token', methods=['POST', 'OPTIONS'])
-def test_token():
-    """ทดสอบการสร้าง token"""
-    
-    if request.method == 'OPTIONS':
-        response = jsonify({'status': 'OK'})
-        return add_cors_headers(response)
-    
-    try:
-        data = request.get_json() or {}
-        username = data.get('username', 'testuser')
-        
-        # สร้าง test token
-        test_user = {
-            'user_id': 999,
-            'username': username,
-            'name': 'Test User'
-        }
-        
-        token = generate_token(test_user)
-        
-        current_app.logger.info(f"Test token generated for: {username}")
-        
-        response = jsonify({
+        payload = jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
+        return _add_cors(jsonify({
             'success': True,
-            'message': f'Test token generated for {username}',
-            'data': {
-                'user': test_user,
-                'token': token,
-                'expires_in_days': 30
-            }
-        })
-        return add_cors_headers(response), 200
-        
-    except Exception as e:
-        current_app.logger.error(f"Test token error: {str(e)}")
-        response = jsonify({
+            'authenticated': True,
+            'user': {
+                'user_id': payload['user_id'],
+                'username': payload['username'],
+                'name': payload.get('name', '')
+            },
+            'token_expires': datetime.fromtimestamp(payload['exp']).isoformat()
+        })), 200
+    except jwt.ExpiredSignatureError:
+        return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'token_expired', 'message': 'Token has expired'})), 401
+    except jwt.InvalidTokenError:
+        return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'invalid_token', 'message': 'Token is invalid'})), 401
+
+# ---------- Profile ----------
+@auth_bp.route('/profile', methods=['GET', 'PUT', 'OPTIONS'])
+def profile():
+    if request.method == 'OPTIONS':
+        return _preflight()
+
+    payload = _get_payload()
+    if not payload:
+        return _add_cors(jsonify({'success': False, 'error': 'unauthorized', 'message': 'Authentication required'})), 401
+
+    user_id = payload['user_id']
+    conn = get_db_connection()
+    if not conn:
+        return _add_cors(jsonify({'success': False, 'error': 'db_failed', 'message': 'Database connection failed'})), 500
+
+    try:
+        cur = conn.cursor(dictionary=True)
+        if request.method == 'GET':
+            cur.execute("SELECT user_id, username, name, user_tel FROM users WHERE user_id = %s", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                return _add_cors(jsonify({'success': False, 'error': 'not_found', 'message': 'User not found'})), 404
+            return _add_cors(jsonify({'success': True, 'data': row})), 200
+
+        # PUT: update profile (name/username/user_tel)
+        data = request.get_json(silent=True) or {}
+        username = (data.get('username') or '').strip()
+        name = (data.get('name') or '').strip()
+        user_tel = (data.get('user_tel') or '').strip()
+
+        if not any([username, name, user_tel]):
+            return _add_cors(jsonify({'success': False, 'error': 'nothing_to_update', 'message': 'ไม่มีข้อมูลสำหรับอัปเดต'})), 400
+
+        # check duplicates if username or phone provided
+        if (username or user_tel) and _user_exists(username=username or None, user_tel=user_tel or None, exclude_user_id=user_id):
+            return _add_cors(jsonify({'success': False, 'error': 'duplicate', 'message': 'ชื่อผู้ใช้หรือเบอร์โทรซ้ำกับผู้ใช้อื่น'})), 409
+
+        fields, params = [], []
+        if username:
+            fields.append("username=%s"); params.append(username)
+        if name:
+            fields.append("name=%s"); params.append(name)
+        if user_tel:
+            fields.append("user_tel=%s"); params.append(user_tel)
+        params.append(user_id)
+
+        sql = "UPDATE users SET " + ", ".join(fields) + " WHERE user_id = %s"
+        cur.execute(sql, tuple(params))
+        conn.commit()
+        return _add_cors(jsonify({'success': True, 'message': 'อัปเดตโปรไฟล์สำเร็จ'})), 200
+    except Error as e:
+        conn.rollback()
+        current_app.logger.error(f"Profile update error: {e}")
+        return _add_cors(jsonify({'success': False, 'error': 'db_error', 'message': str(e)})), 500
+    finally:
+        if conn.is_connected():
+            cur.close()
+            conn.close()
+
+# รองรับทั้งของใหม่และ alias เดิมจากแอป: /profile/password และ /change-password
+# รองรับทั้งของใหม่และ alias เดิมจากแอป: /profile/password และ /change-password
+@auth_bp.route('/profile/password', methods=['PUT', 'OPTIONS'])
+@auth_bp.route('/change-password', methods=['PUT', 'OPTIONS'])  # alias เก่า
+def change_password():
+    if request.method == 'OPTIONS':
+        return _preflight()
+
+    payload = _get_payload()
+    if not payload:
+        return _add_cors(jsonify({
             'success': False,
-            'error': str(e)
-        })
-        return add_cors_headers(response), 500
+            'error': 'unauthorized',
+            'message': 'Authentication required'
+        })), 401
+
+    # ✅ รองรับทั้ง JSON และ form; เติม confirm_password อัตโนมัติถ้าไม่ได้ส่งมา
+    data = (request.get_json(silent=True) or request.form or {})
+    current_password = (data.get('current_password') or data.get('old_password') or '').strip()
+    new_password     = (data.get('new_password') or data.get('password') or '').strip()
+    confirm_password = (data.get('confirm_password') or
+                        data.get('password_confirmation') or
+                        new_password).strip()  # ← default = new_password
+
+    if not current_password or not new_password:
+        return _add_cors(jsonify({
+            'success': False,
+            'error': 'missing_fields',
+            'message': 'กรุณากรอกข้อมูลให้ครบ'
+        })), 400
+
+    if new_password != confirm_password:
+        return _add_cors(jsonify({
+            'success': False,
+            'error': 'password_mismatch',
+            'message': 'รหัสผ่านใหม่ไม่ตรงกัน'
+        })), 400
+
+    if len(new_password) < 6:
+        return _add_cors(jsonify({
+            'success': False,
+            'error': 'password_too_short',
+            'message': 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'
+        })), 400
+
+    user_id = payload['user_id']
+    conn = get_db_connection()
+    if not conn:
+        return _add_cors(jsonify({
+            'success': False,
+            'error': 'db_failed',
+            'message': 'Database connection failed'
+        })), 500
+
+    try:
+        cur = conn.cursor()
+        # verify current password
+        cur.execute("SELECT user_password FROM users WHERE user_id = %s", (user_id,))
+        row = cur.fetchone()
+        if not row:
+            return _add_cors(jsonify({
+                'success': False,
+                'error': 'not_found',
+                'message': 'User not found'
+            })), 404
+
+        if row[0] != hash_password(current_password):
+            return _add_cors(jsonify({
+                'success': False,
+                'error': 'wrong_password',
+                'message': 'รหัสผ่านเดิมไม่ถูกต้อง'
+            })), 400
+
+        # update password
+        cur.execute(
+            "UPDATE users SET user_password = %s WHERE user_id = %s",
+            (hash_password(new_password), user_id)
+        )
+        conn.commit()
+        return _add_cors(jsonify({
+            'success': True,
+            'message': 'เปลี่ยนรหัสผ่านสำเร็จ'
+        })), 200
+
+    except Error as e:
+        conn.rollback()
+        current_app.logger.error(f"Change password error: {e}")
+        return _add_cors(jsonify({
+            'success': False,
+            'error': 'db_error',
+            'message': str(e)
+        })), 500
+    finally:
+        if conn.is_connected():
+            cur.close()
+            conn.close()

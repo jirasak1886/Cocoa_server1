@@ -2,6 +2,8 @@ from flask import Blueprint, request, jsonify, current_app
 from mysql.connector import Error
 from config.database import get_db_connection
 import jwt
+import json
+from decimal import Decimal, InvalidOperation
 
 field_zone_bp = Blueprint('field_zone', __name__)
 
@@ -34,6 +36,62 @@ def require_auth():
             'message': 'Authentication required'
         }), 401
     return user, None, None
+
+def num_or_none(value):
+    """แปลงเป็น float แบบปลอดภัย: None หรือ '' หรือ parse ไม่ได้ -> None"""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip()
+    if s == '':
+        return None
+    try:
+        # รองรับเลขทศนิยมยาวๆ ด้วย Decimal แล้วค่อย float
+        return float(Decimal(s))
+    except (InvalidOperation, ValueError):
+        return None
+
+def ensure_json():
+    """อ่าน body เป็น dict: รองรับ form และกรณี vertices ส่งมาเป็นสตริง JSON"""
+    data = {}
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+    else:
+        data = request.form.to_dict(flat=True)
+        # แนบรายการที่ซ้ำชื่อ (เช่น vertices[]) ถ้ามี
+        for k in request.form:
+            vals = request.form.getlist(k)
+            if len(vals) > 1:
+                data[k] = vals
+    return data
+
+def coerce_list_vertices(vertices):
+    """
+    รับ vertices ได้ทั้ง list ของ dict, หรือสตริง JSON
+    คืนค่าเป็น list[{'latitude': float, 'longitude': float}] ที่กรองค่าว่างออกแล้ว
+    """
+    if vertices is None:
+        return []
+    if isinstance(vertices, str):
+        try:
+            vertices = json.loads(vertices)
+        except json.JSONDecodeError:
+            return []  # ถ้า parse ไม่ได้ถือว่าไม่มี
+    if not isinstance(vertices, list):
+        return []
+    out = []
+    order = 1
+    for v in vertices:
+        if not isinstance(v, dict):
+            continue
+        lat = num_or_none(v.get('latitude') if 'latitude' in v else v.get('lat'))
+        lng = num_or_none(v.get('longitude') if 'longitude' in v else v.get('lng'))
+        if lat is None or lng is None:
+            continue
+        out.append({'latitude': lat, 'longitude': lng, 'point_order': order})
+        order += 1
+    return out
 
 # ==================== FIELDS ROUTES ====================
 
@@ -124,12 +182,12 @@ def create_field():
         return error_response, status_code
     
     try:
-        data = request.get_json() if request.is_json else request.form
-        field_name = data.get('field_name')
-        size_square_meter = data.get('size_square_meter')
-        vertices = data.get('vertices', [])  # list ของ {latitude/lat, longitude/lng}
+        data = ensure_json()
+        field_name = (data.get('field_name') or '').strip()
+        size_square_meter = num_or_none(data.get('size_square_meter'))
+        vertices = coerce_list_vertices(data.get('vertices'))
 
-        if not field_name or not size_square_meter:
+        if not field_name or size_square_meter is None:
             return jsonify({'success': False, 'error': 'กรุณากรอกข้อมูลให้ครบถ้วน'}), 400
         
         conn = get_db_connection()
@@ -142,29 +200,17 @@ def create_field():
                 INSERT INTO field (field_name, size_square_meter, user_id)
                 VALUES (%s, %s, %s)
             """, (field_name, size_square_meter, user['user_id']))
-            # จากนั้น loop บันทึก vertices -> field_point(field_id, latitude, longitude, point_order)
-
-            conn.commit()
             field_id = cursor.lastrowid
 
             # บันทึกหลายพิกัดของแปลง (ถ้ามี) → field_point(point_order)
-            if isinstance(vertices, list) and vertices:
-                vals = []
-                order = 1
-                for v in vertices:
-                    lat = v.get('latitude') or v.get('lat')
-                    lng = v.get('longitude') or v.get('lng')
-                    if lat is None or lng is None:
-                        continue
-                    vals.append((field_id, float(lat), float(lng), order))
-                    order += 1
-                if vals:
-                    cursor.executemany("""
-                        INSERT INTO field_point (field_id, latitude, longitude, point_order)
-                        VALUES (%s, %s, %s, %s)
-                    """, vals)
-                    conn.commit()
+            if vertices:
+                vals = [(field_id, v['latitude'], v['longitude'], v['point_order']) for v in vertices]
+                cursor.executemany("""
+                    INSERT INTO field_point (field_id, latitude, longitude, point_order)
+                    VALUES (%s, %s, %s, %s)
+                """, vals)
 
+            conn.commit()
             return jsonify({'success': True, 'field_id': field_id, 'message': 'สร้างแปลงสำเร็จ'})
         except Error as e:
             conn.rollback()
@@ -174,6 +220,7 @@ def create_field():
                 cursor.close()
                 conn.close()
     except Exception as e:
+        current_app.logger.exception("create_field failed")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @field_zone_bp.route('/fields/<int:field_id>', methods=['GET'])
@@ -220,14 +267,25 @@ def update_field(field_id):
     user, error_response, status_code = require_auth()
     if error_response:
         return error_response, status_code
-    
-    try:
-        data = request.get_json()
-        field_name = data.get('field_name')
-        size_square_meter = data.get('size_square_meter')
-        vertices = data.get('vertices', [])  # list
 
-        if not field_name or not size_square_meter:
+    try:
+        # ---- LOG RAW REQUEST ----
+        current_app.logger.debug("PUT /fields/%s HEADERS=%s", field_id, dict(request.headers))
+        current_app.logger.debug("PUT /fields/%s RAW_DATA=%s", field_id, request.get_data(as_text=True))
+
+        data = ensure_json()
+        current_app.logger.debug("PUT /fields/%s PARSED_DATA=%s", field_id, data)
+
+        field_name = (data.get('field_name') or '').strip()
+        size_square_meter = num_or_none(data.get('size_square_meter'))
+        vertices = coerce_list_vertices(data.get('vertices'))
+
+        # ---- LOG TYPES ----
+        current_app.logger.debug("PUT /fields/%s name=%r size=%r type(size)=%s vertices_len=%d",
+                                 field_id, field_name, size_square_meter,
+                                 type(size_square_meter).__name__, len(vertices))
+
+        if not field_name or size_square_meter is None:
             return jsonify({'success': False, 'error': 'กรุณากรอกข้อมูลให้ครบถ้วน'}), 400
         
         conn = get_db_connection()
@@ -237,10 +295,11 @@ def update_field(field_id):
         try:
             cursor = conn.cursor()
 
-            # ตรวจสิทธิ์
             cursor.execute("SELECT user_id FROM field WHERE field_id = %s", (field_id,))
-            owner = cursor.fetchone()
-            if not owner or owner[0] != user['user_id']:
+            row = cursor.fetchone()
+            if not row:
+                return jsonify({'success': False, 'error': 'Field not found'}), 404
+            if row[0] != user['user_id']:
                 return jsonify({'success': False, 'error': 'ไม่มีสิทธิ์เข้าถึงแปลงนี้'}), 403
 
             cursor.execute("""
@@ -248,36 +307,27 @@ def update_field(field_id):
                 SET field_name = %s, size_square_meter = %s
                 WHERE field_id = %s
             """, (field_name, size_square_meter, field_id))
-            conn.commit()
 
-            # แทนที่ vertices
             cursor.execute("DELETE FROM field_point WHERE field_id = %s", (field_id,))
-            if isinstance(vertices, list) and vertices:
-                vals = []
-                order = 1
-                for v in vertices:
-                    lat = v.get('latitude') or v.get('lat')
-                    lng = v.get('longitude') or v.get('lng')
-                    if lat is None or lng is None:
-                        continue
-                    vals.append((field_id, float(lat), float(lng), order))
-                    order += 1
-                if vals:
-                    cursor.executemany("""
-                        INSERT INTO field_point (field_id, latitude, longitude, point_order)
-                        VALUES (%s, %s, %s, %s)
-                    """, vals)
-            conn.commit()
+            if vertices:
+                vals = [(field_id, v['latitude'], v['longitude'], v['point_order']) for v in vertices]
+                cursor.executemany("""
+                    INSERT INTO field_point (field_id, latitude, longitude, point_order)
+                    VALUES (%s, %s, %s, %s)
+                """, vals)
 
+            conn.commit()
             return jsonify({'success': True, 'message': 'อัปเดตแปลงสำเร็จ'})
         except Error as e:
             conn.rollback()
+            current_app.logger.exception("update_field mysql error")
             return jsonify({'success': False, 'error': str(e)}), 500
         finally:
             if conn.is_connected():
                 cursor.close()
                 conn.close()
     except Exception as e:
+        current_app.logger.exception("update_field failed (unexpected)")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -298,7 +348,9 @@ def delete_field(field_id):
         # ตรวจสิทธิ์
         cursor.execute("SELECT user_id FROM field WHERE field_id = %s", (field_id,))
         owner = cursor.fetchone()
-        if not owner or owner[0] != user['user_id']:
+        if not owner:
+            return jsonify({'success': False, 'error': 'Field not found'}), 404
+        if owner[0] != user['user_id']:
             return jsonify({'success': False, 'error': 'ไม่มีสิทธิ์เข้าถึงแปลงนี้'}), 403
 
         # กันลบถ้ามีโซน
@@ -329,11 +381,11 @@ def create_zone():
         return error_response, status_code
     
     try:
-        data = request.get_json() if request.is_json else request.form
-        field_id = data.get('field_id')
-        zone_name = data.get('zone_name')
-        num_trees = data.get('num_trees')
-        marks = data.get('marks', [])  # list ของ {tree_no, latitude, longitude}
+        data = ensure_json()
+        field_id = num_or_none(data.get('field_id'))
+        zone_name = (data.get('zone_name') or '').strip()
+        num_trees = num_or_none(data.get('num_trees'))
+        marks = data.get('marks', [])
 
         if not field_id or not zone_name:
             return jsonify({'success': False, 'error': 'กรุณากรอกข้อมูลให้ครบถ้วน'}), 400
@@ -354,15 +406,16 @@ def create_zone():
             # ตรวจสิทธิ์เข้าถึง field
             cursor.execute("SELECT user_id FROM field WHERE field_id = %s", (field_id,))
             owner = cursor.fetchone()
-            if not owner or owner[0] != user['user_id']:
+            if not owner:
+                return jsonify({'success': False, 'error': 'Field not found'}), 404
+            if owner[0] != user['user_id']:
                 return jsonify({'success': False, 'error': 'ไม่มีสิทธิ์เข้าถึงแปลงนี้'}), 403
 
             # บันทึกโซน (schema zone ไม่มี lat/lng)
             cursor.execute("""
                 INSERT INTO zone (zone_name, num_trees, field_id)
                 VALUES (%s, %s, %s)
-            """, (zone_name, num_trees, field_id))
-            conn.commit()
+            """, (zone_name, int(num_trees), int(field_id)))
             zone_id = cursor.lastrowid
 
             # เพิ่ม marks (ถ้ามี)
@@ -370,26 +423,27 @@ def create_zone():
             if isinstance(marks, list) and marks:
                 vals = []
                 for i, m in enumerate(marks, start=1):
+                    if not isinstance(m, dict):
+                        continue
                     tn = m.get('tree_no', i)
-                    lat = m.get('latitude')
-                    lng = m.get('longitude')
+                    lat = num_or_none(m.get('latitude'))
+                    lng = num_or_none(m.get('longitude'))
                     if lat is None or lng is None:
                         continue
-                    vals.append((zone_id, int(tn), float(lat), float(lng)))
+                    vals.append((zone_id, int(tn), lat, lng))
                 if vals:
                     cursor.executemany("""
                         INSERT INTO mark_zone (zone_id, tree_no, latitude, longitude)
                         VALUES (%s, %s, %s, %s)
                     """, vals)
-                    conn.commit()
                     inserted = len(vals)
 
                 # sync num_trees
                 cursor.execute("SELECT COUNT(*) FROM mark_zone WHERE zone_id = %s", (zone_id,))
                 count = cursor.fetchone()[0]
                 cursor.execute("UPDATE zone SET num_trees = %s WHERE zone_id = %s", (count, zone_id))
-                conn.commit()
 
+            conn.commit()
             return jsonify({
                 'success': True,
                 'zone_id': zone_id,
@@ -404,6 +458,7 @@ def create_zone():
                 cursor.close()
                 conn.close()
     except Exception as e:
+        current_app.logger.exception("create_zone failed")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @field_zone_bp.route('/zones/<int:zone_id>', methods=['GET'])
@@ -445,9 +500,9 @@ def update_zone(zone_id):
         return error_response, status_code
     
     try:
-        data = request.get_json()
-        zone_name = data.get('zone_name')
-        num_trees = data.get('num_trees')
+        data = ensure_json()
+        zone_name = (data.get('zone_name') or '').strip()
+        num_trees = num_or_none(data.get('num_trees'))
 
         if not zone_name or num_trees is None:
             return jsonify({'success': False, 'error': 'กรุณากรอกข้อมูลให้ครบถ้วน'}), 400
@@ -466,14 +521,16 @@ def update_zone(zone_id):
                 WHERE z.zone_id = %s
             """, (zone_id,))
             result = cursor.fetchone()
-            if not result or result[0] != user['user_id']:
+            if not result:
+                return jsonify({'success': False, 'error': 'Zone not found'}), 404
+            if result[0] != user['user_id']:
                 return jsonify({'success': False, 'error': 'ไม่มีสิทธิ์เข้าถึงโซนนี้'}), 403
 
             cursor.execute("""
                 UPDATE zone 
                 SET zone_name = %s, num_trees = %s
                 WHERE zone_id = %s
-            """, (zone_name, num_trees, zone_id))
+            """, (zone_name, int(num_trees), zone_id))
             conn.commit()
 
             return jsonify({'success': True, 'message': 'อัปเดตโซนสำเร็จ'})
@@ -485,6 +542,7 @@ def update_zone(zone_id):
                 cursor.close()
                 conn.close()
     except Exception as e:
+        current_app.logger.exception("update_zone failed")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @field_zone_bp.route('/zones/<int:zone_id>', methods=['DELETE'])
@@ -508,7 +566,9 @@ def delete_zone(zone_id):
             WHERE z.zone_id = %s
         """, (zone_id,))
         result = cursor.fetchone()
-        if not result or result[0] != user['user_id']:
+        if not result:
+            return jsonify({'success': False, 'error': 'Zone not found'}), 404
+        if result[0] != user['user_id']:
             return jsonify({'success': False, 'error': 'ไม่มีสิทธิ์เข้าถึงโซนนี้'}), 403
 
         # กันลบถ้ามีประวัติการตรวจสอบ
@@ -579,11 +639,11 @@ def create_mark(zone_id):
         return error_response, status_code
 
     try:
-        data = request.get_json(force=True) or {}
+        data = ensure_json()
         marks = data.get('marks')  # ถ้ามีคือ bulk
         tree_no = data.get('tree_no')
-        latitude = data.get('latitude')
-        longitude = data.get('longitude')
+        latitude = num_or_none(data.get('latitude'))
+        longitude = num_or_none(data.get('longitude'))
 
         if not marks and (tree_no is None or latitude is None or longitude is None):
             return jsonify({'success': False, 'error': 'กรุณากรอกข้อมูลให้ครบถ้วน'}), 400
@@ -602,19 +662,23 @@ def create_mark(zone_id):
                 WHERE z.zone_id = %s
             """, (zone_id,))
             owner = cursor.fetchone()
-            if not owner or owner[0] != user['user_id']:
+            if not owner:
+                return jsonify({'success': False, 'error': 'Zone not found'}), 404
+            if owner[0] != user['user_id']:
                 return jsonify({'success': False, 'error': 'ไม่มีสิทธิ์เข้าถึงโซนนี้'}), 403
 
             inserted = 0
             if isinstance(marks, list) and marks:
                 vals = []
                 for i, m in enumerate(marks, start=1):
+                    if not isinstance(m, dict):
+                        continue
                     tn = m.get('tree_no', i)
-                    lat = m.get('latitude')
-                    lng = m.get('longitude')
+                    lat = num_or_none(m.get('latitude'))
+                    lng = num_or_none(m.get('longitude'))
                     if lat is None or lng is None:
                         continue
-                    vals.append((zone_id, int(tn), float(lat), float(lng)))
+                    vals.append((zone_id, int(tn), lat, lng))
                 if vals:
                     cursor.executemany("""
                         INSERT INTO mark_zone (zone_id, tree_no, latitude, longitude)
@@ -625,17 +689,15 @@ def create_mark(zone_id):
                 cursor.execute("""
                     INSERT INTO mark_zone (zone_id, tree_no, latitude, longitude)
                     VALUES (%s, %s, %s, %s)
-                """, (zone_id, tree_no, latitude, longitude))
+                """, (zone_id, int(tree_no), latitude, longitude))
                 inserted = 1
-
-            conn.commit()
 
             # sync num_trees
             cursor.execute("SELECT COUNT(*) FROM mark_zone WHERE zone_id = %s", (zone_id,))
             count = cursor.fetchone()[0]
             cursor.execute("UPDATE zone SET num_trees = %s WHERE zone_id = %s", (count, zone_id))
-            conn.commit()
 
+            conn.commit()
             return jsonify({
                 'success': True,
                 'inserted': inserted,
@@ -650,4 +712,5 @@ def create_mark(zone_id):
                 cursor.close()
                 conn.close()
     except Exception as e:
+        current_app.logger.exception("create_mark failed")
         return jsonify({'success': False, 'error': str(e)}), 500
