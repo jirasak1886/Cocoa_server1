@@ -1,12 +1,22 @@
 from flask import Blueprint, request, jsonify, current_app
 from mysql.connector import Error
 from config.database import get_db_connection, hash_password
-import jwt
+import jwt, bcrypt
 from datetime import datetime, timedelta
 
 auth_bp = Blueprint('auth', __name__)
 
-# ==================== HELPER ====================
+# ==================== PASSWORD HELPERS ====================
+def _bcrypt_hash(password: str) -> str:
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+
+def _bcrypt_check(password: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode(), hashed.encode())
+    except Exception:
+        return False
+
+# ==================== CORS HELPERS ====================
 def _add_cors(resp):
     resp.headers.add('Access-Control-Allow-Origin', '*')
     resp.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
@@ -59,43 +69,70 @@ def _user_exists(username=None, user_tel=None, exclude_user_id=None):
 # ==================== AUTH CORE ====================
 def authenticate_user(username, password):
     conn = get_db_connection()
-    if conn:
-        try:
-            cursor = conn.cursor(dictionary=True)
-            hashed = hash_password(password)
-            cursor.execute("""
-                SELECT user_id, username, name, user_tel
-                FROM users
-                WHERE username = %s AND user_password = %s
-            """, (username, hashed))
-            return cursor.fetchone()
-        finally:
-            if conn.is_connected():
-                cursor.close()
-                conn.close()
-    return None
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("""
+            SELECT user_id, username, name, user_tel, user_password
+            FROM users WHERE username=%s
+        """, (username,))
+        user = cur.fetchone()
+        if not user:
+            return None
+
+        db_pass = user["user_password"]
+
+        # ✅ case 1: bcrypt
+        if db_pass.startswith("$2b$") or db_pass.startswith("$2a$"):
+            if _bcrypt_check(password, db_pass):
+                return user
+            return None
+
+        # ✅ case 2: sha256 legacy
+        if len(db_pass) == 64 and all(c in "0123456789abcdef" for c in db_pass.lower()):
+            if db_pass == hash_password(password):
+                # migrate เป็น bcrypt
+                new_hash = _bcrypt_hash(password)
+                cur.execute("UPDATE users SET user_password=%s WHERE user_id=%s", (new_hash, user["user_id"]))
+                conn.commit()
+                return user
+            return None
+
+        # ✅ case 3: plain legacy
+        if password == db_pass:
+            new_hash = _bcrypt_hash(password)
+            cur.execute("UPDATE users SET user_password=%s WHERE user_id=%s", (new_hash, user["user_id"]))
+            conn.commit()
+            return user
+
+        return None
+    finally:
+        if conn.is_connected():
+            cur.close()
+            conn.close()
 
 def register_user(username, user_tel, password, name):
     conn = get_db_connection()
-    if conn:
-        try:
-            cursor = conn.cursor()
-            hashed = hash_password(password)
-            cursor.execute("""
-                INSERT INTO users (username, user_tel, user_password, name)
-                VALUES (%s, %s, %s, %s)
-            """, (username, user_tel, hashed, name))
-            conn.commit()
-            return cursor.lastrowid
-        except Error as e:
-            current_app.logger.error(f"เกิดข้อผิดพลาด: {e}")
-            conn.rollback()
-            return None
-        finally:
-            if conn.is_connected():
-                cursor.close()
-                conn.close()
-    return None
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        hashed = _bcrypt_hash(password)  # ✅ always bcrypt
+        cur.execute("""
+            INSERT INTO users (username, user_tel, user_password, name)
+            VALUES (%s,%s,%s,%s)
+        """, (username, user_tel, hashed, name))
+        conn.commit()
+        return cur.lastrowid
+    except Error as e:
+        current_app.logger.error(f"Registration error: {e}")
+        conn.rollback()
+        return None
+    finally:
+        if conn.is_connected():
+            cur.close()
+            conn.close()
 
 def generate_token(user_data):
     now = datetime.utcnow()
@@ -252,7 +289,7 @@ def profile():
                 return _add_cors(jsonify({'success': False, 'error': 'not_found', 'message': 'User not found'})), 404
             return _add_cors(jsonify({'success': True, 'data': row})), 200
 
-        # PUT: update profile (name/username/user_tel)
+        # PUT: update profile
         data = request.get_json(silent=True) or {}
         username = (data.get('username') or '').strip()
         name = (data.get('name') or '').strip()
@@ -261,7 +298,6 @@ def profile():
         if not any([username, name, user_tel]):
             return _add_cors(jsonify({'success': False, 'error': 'nothing_to_update', 'message': 'ไม่มีข้อมูลสำหรับอัปเดต'})), 400
 
-        # check duplicates if username or phone provided
         if (username or user_tel) and _user_exists(username=username or None, user_tel=user_tel or None, exclude_user_id=user_id):
             return _add_cors(jsonify({'success': False, 'error': 'duplicate', 'message': 'ชื่อผู้ใช้หรือเบอร์โทรซ้ำกับผู้ใช้อื่น'})), 409
 
@@ -287,10 +323,9 @@ def profile():
             cur.close()
             conn.close()
 
-# รองรับทั้งของใหม่และ alias เดิมจากแอป: /profile/password และ /change-password
-# รองรับทั้งของใหม่และ alias เดิมจากแอป: /profile/password และ /change-password
+# ---------- Change Password ----------
 @auth_bp.route('/profile/password', methods=['PUT', 'OPTIONS'])
-@auth_bp.route('/change-password', methods=['PUT', 'OPTIONS'])  # alias เก่า
+@auth_bp.route('/change-password', methods=['PUT', 'OPTIONS'])
 def change_password():
     if request.method == 'OPTIONS':
         return _preflight()
@@ -303,82 +338,54 @@ def change_password():
             'message': 'Authentication required'
         })), 401
 
-    # ✅ รองรับทั้ง JSON และ form; เติม confirm_password อัตโนมัติถ้าไม่ได้ส่งมา
     data = (request.get_json(silent=True) or request.form or {})
     current_password = (data.get('current_password') or data.get('old_password') or '').strip()
     new_password     = (data.get('new_password') or data.get('password') or '').strip()
-    confirm_password = (data.get('confirm_password') or
-                        data.get('password_confirmation') or
-                        new_password).strip()  # ← default = new_password
+    confirm_password = (data.get('confirm_password') or data.get('password_confirmation') or new_password).strip()
 
     if not current_password or not new_password:
-        return _add_cors(jsonify({
-            'success': False,
-            'error': 'missing_fields',
-            'message': 'กรุณากรอกข้อมูลให้ครบ'
-        })), 400
-
+        return _add_cors(jsonify({'success': False, 'error': 'missing_fields', 'message': 'กรุณากรอกข้อมูลให้ครบ'})), 400
     if new_password != confirm_password:
-        return _add_cors(jsonify({
-            'success': False,
-            'error': 'password_mismatch',
-            'message': 'รหัสผ่านใหม่ไม่ตรงกัน'
-        })), 400
-
+        return _add_cors(jsonify({'success': False, 'error': 'password_mismatch', 'message': 'รหัสผ่านใหม่ไม่ตรงกัน'})), 400
     if len(new_password) < 6:
-        return _add_cors(jsonify({
-            'success': False,
-            'error': 'password_too_short',
-            'message': 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'
-        })), 400
+        return _add_cors(jsonify({'success': False, 'error': 'password_too_short', 'message': 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'})), 400
 
     user_id = payload['user_id']
     conn = get_db_connection()
     if not conn:
-        return _add_cors(jsonify({
-            'success': False,
-            'error': 'db_failed',
-            'message': 'Database connection failed'
-        })), 500
+        return _add_cors(jsonify({'success': False, 'error': 'db_failed', 'message': 'Database connection failed'})), 500
 
     try:
-        cur = conn.cursor()
-        # verify current password
-        cur.execute("SELECT user_password FROM users WHERE user_id = %s", (user_id,))
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT user_password FROM users WHERE user_id=%s", (user_id,))
         row = cur.fetchone()
         if not row:
-            return _add_cors(jsonify({
-                'success': False,
-                'error': 'not_found',
-                'message': 'User not found'
-            })), 404
+            return _add_cors(jsonify({'success': False, 'error': 'not_found', 'message': 'User not found'})), 404
 
-        if row[0] != hash_password(current_password):
-            return _add_cors(jsonify({
-                'success': False,
-                'error': 'wrong_password',
-                'message': 'รหัสผ่านเดิมไม่ถูกต้อง'
-            })), 400
+        db_pass = row["user_password"]
 
-        # update password
-        cur.execute(
-            "UPDATE users SET user_password = %s WHERE user_id = %s",
-            (hash_password(new_password), user_id)
-        )
+        # verify old password (bcrypt + legacy)
+        valid = False
+        if db_pass.startswith("$2b$") and _bcrypt_check(current_password, db_pass):
+            valid = True
+        elif len(db_pass) == 64 and db_pass == hash_password(current_password):
+            valid = True
+        elif current_password == db_pass:
+            valid = True
+
+        if not valid:
+            return _add_cors(jsonify({'success': False, 'error': 'wrong_password', 'message': 'รหัสผ่านเดิมไม่ถูกต้อง'})), 400
+
+        # update new password with bcrypt
+        new_hash = _bcrypt_hash(new_password)
+        cur.execute("UPDATE users SET user_password=%s WHERE user_id=%s", (new_hash, user_id))
         conn.commit()
-        return _add_cors(jsonify({
-            'success': True,
-            'message': 'เปลี่ยนรหัสผ่านสำเร็จ'
-        })), 200
 
+        return _add_cors(jsonify({'success': True, 'message': 'เปลี่ยนรหัสผ่านสำเร็จ'})), 200
     except Error as e:
         conn.rollback()
         current_app.logger.error(f"Change password error: {e}")
-        return _add_cors(jsonify({
-            'success': False,
-            'error': 'db_error',
-            'message': str(e)
-        })), 500
+        return _add_cors(jsonify({'success': False, 'error': 'db_error', 'message': str(e)})), 500
     finally:
         if conn.is_connected():
             cur.close()
