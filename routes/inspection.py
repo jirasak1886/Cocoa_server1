@@ -36,16 +36,11 @@ def _user_id(u):
     return u.get('user_id') or u.get('sub') or u.get('uid')
 
 def _authz():
-    """คืน (user_payload, error_tuple_or_None) เสมอ"""
     if request.method == 'OPTIONS':
         return None, ('', 204)
     u = _get_user()
     if not u:
-        return None, (jsonify({
-            'success': False,
-            'error': 'unauthorized',
-            'message': 'Authentication required'
-        }), 401)
+        return None, (jsonify({'success': False,'error': 'unauthorized','message': 'Authentication required'}), 401)
     return u, None
 
 def _ensure_json():
@@ -70,18 +65,87 @@ def _normalize_range(dfrom_str, dto_str):
     return start_dt, end_dt
 
 def _uploads_root() -> Path:
-    # ให้ ENV มีลำดับความสำคัญสูงสุด
     env_root = os.environ.get('UPLOAD_ROOT', '').strip()
     if env_root:
         return Path(env_root)
-    # ค่าเริ่มต้น: โฟลเดอร์ upload (ตามที่ตกลง)
-    return Path(current_app.root_path) / 'upload'
+    return Path(current_app.root_path) / 'static' / 'uploads'
 
 def _ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
 
 def _ext_ok(filename: str) -> bool:
     return '.' in filename and filename.rsplit('.', 1)[-1].lower() in ALLOWED_EXTS
+
+# ---------- RULE-BASED RECOMMENDATIONS (NEW) ----------
+def _upsert_recommendations(cur, inspection_id: int, agg: dict):
+    """
+    agg: {'K': {'max_conf': 92.1, 'max_sev': 'severe'}, 'Mg': {...}, ...}
+    แนวทางแบบง่าย: สร้าง/อัปเดตคำแนะนำลง zone_inspection_recommendation
+    """
+    RULES = {
+        'K': {
+            'fert_name': 'โพแทสเซียมคลอไรด์ (MOP)',
+            'formulation': '0-0-60',
+            'text': 'เสริมโพแทสเซียมและควบคุมความชื้น/ความเค็มของดิน',
+            'rate_per_area': '10–20 กก./ไร่',
+            'application_method': 'หว่านรอบโคน/คลุกดิน',
+        },
+        'Mg': {
+            'fert_name': 'คีเซอร์ไรท์ หรือ โดโลไมท์',
+            'formulation': 'Kieserite/Dolomite',
+            'text': 'ให้แมกนีเซียมพ่นทางใบหรือใส่ทางดิน',
+            'rate_per_area': '10–25 กก./ไร่',
+            'application_method': 'หว่าน + รดน้ำ/พ่นใบ',
+        },
+        'N': {
+            'fert_name': 'ยูเรีย',
+            'formulation': '46-0-0',
+            'text': 'เสริมไนโตรเจน เพิ่มอินทรียวัตถุและจัดการน้ำให้สม่ำเสมอ',
+            'rate_per_area': '5–10 กก./ไร่',
+            'application_method': 'แบ่งใส่หลายครั้ง',
+        },
+        'P': {
+            'fert_name': 'ซุปเปอร์ฟอสเฟต',
+            'formulation': '0-46-0',
+            'text': 'เสริมฟอสฟอรัส ช่วยระบบรากและการแตกยอด',
+            'rate_per_area': '5–10 กก./ไร่',
+            'application_method': 'คลุกดิน/รองก้นหลุม',
+        },
+    }
+
+    for code, stat in agg.items():
+        rule = RULES.get(code)
+        if not rule:
+            continue
+
+        # ตรวจ rec เดิมของ inspection + nutrient_code เพื่อเลี่ยงซ้ำ
+        cur.execute("""
+            SELECT recommendation_id
+            FROM zone_inspection_recommendation
+            WHERE inspection_id=%s AND nutrient_code=%s
+            ORDER BY recommendation_id DESC
+            LIMIT 1
+        """, (inspection_id, code))
+        row = cur.fetchone()
+
+        if row:
+            cur.execute("""
+                UPDATE zone_inspection_recommendation
+                   SET recommendation_text=%s,
+                       rate_per_area=%s,
+                       application_method=%s,
+                       status=COALESCE(status,'suggested')
+                 WHERE recommendation_id=%s
+            """, (rule['text'], rule['rate_per_area'], rule['application_method'], row['recommendation_id']))
+        else:
+            cur.execute("""
+                INSERT INTO zone_inspection_recommendation(
+                    inspection_id, fertilizer_id, nutrient_code,
+                    recommendation_text, rate_per_area, application_method,
+                    status, created_at
+                ) VALUES (%s, NULL, %s, %s, %s, %s, %s, NOW())
+            """, (inspection_id, code, rule['text'], rule['rate_per_area'],
+                  rule['application_method'], 'suggested'))
 
 # ---------- start round ----------
 @inspection_bp.route('/start', methods=['POST', 'OPTIONS'])
@@ -97,7 +161,6 @@ def start_round():
     zone_id  = body.get('zone_id')
     notes    = (body.get('notes') or '').strip() or None
 
-    # รองรับการ “เริ่มรอบใหม่” ทันที: ส่ง new_round=true (body หรือ query ก็ได้)
     new_round = body.get('new_round')
     if new_round is None:
         qv = (request.args.get('new_round') or '').strip().lower()
@@ -115,7 +178,6 @@ def start_round():
     try:
         cur = conn.cursor(dictionary=True)
 
-        # ตรวจว่า field เป็นของ user
         cur.execute("SELECT user_id FROM field WHERE field_id=%s", (field_id,))
         owner = cur.fetchone()
         if not owner:
@@ -123,7 +185,6 @@ def start_round():
         if owner['user_id'] != uid:
             return jsonify({'success': False, 'error': 'forbidden'}), 403
 
-        # หา "รอบที่เปิดอยู่"
         cur.execute("""
             SELECT inspection_id, round_no
             FROM zone_inspection
@@ -133,13 +194,11 @@ def start_round():
         exist = cur.fetchone()
 
         if exist and not new_round:
-            # พฤติกรรมเดิม: idempotent (ยกเลิกรอบใหม่ ใช้รอบเดิม)
             return jsonify({
                 'success': True, 'idempotent': True,
                 'inspection_id': exist['inspection_id'], 'round_no': exist['round_no']
             })
 
-        # ถ้ามีรอบค้างอยู่ และผู้ใช้ขอ new_round ให้ปิดรอบเดิมก่อน (กันมีหลาย pending)
         if exist and new_round:
             cur.execute("""
                 UPDATE zone_inspection
@@ -148,7 +207,6 @@ def start_round():
             """, (STATUS_DONE, exist['inspection_id'], STATUS_OPEN))
             conn.commit()
 
-        # สร้างรอบใหม่: round_no = MAX(round_no) + 1
         cur.execute("""
             SELECT MAX(round_no) AS max_round
             FROM zone_inspection
@@ -196,7 +254,6 @@ def upload_images(inspection_id):
     try:
         cur = conn.cursor(dictionary=True)
 
-        # ตรวจสิทธิ์ + สถานะรอบ
         cur.execute("""
             SELECT zi.inspection_id, zi.field_id, zi.zone_id, zi.status, f.user_id
             FROM zone_inspection zi
@@ -211,26 +268,18 @@ def upload_images(inspection_id):
         if it['status'] != STATUS_OPEN:
             return jsonify({'success': False, 'error': 'closed_round'}), 400
 
-        # นับรูปใน "รอบนี้"
         cur.execute("SELECT COUNT(*) AS c FROM zone_inspection_image WHERE inspection_id=%s", (inspection_id,))
         already = cur.fetchone()['c'] or 0
 
-        # โควตาต่อรอบ (≤ 5)
         remain = max(0, MAX_IMAGES_PER_ROUND - already)
         if remain == 0:
-            return jsonify({
-                'success': False,
-                'error': 'quota_full',
-                'exist': already,
-                'max': MAX_IMAGES_PER_ROUND
-            }), 400
+            return jsonify({'success': False, 'error': 'quota_full', 'exist': already, 'max': MAX_IMAGES_PER_ROUND}), 400
 
         saved = []
         root = _uploads_root()
         folder = root / 'inspections' / str(inspection_id)
         _ensure_dir(folder)
 
-        # รับไฟล์จาก multipart (ทุก field รวมกัน)
         files = list(request.files.values())
         will_save = files[:remain]
         skipped = max(0, len(files) - len(will_save))
@@ -240,7 +289,6 @@ def upload_images(inspection_id):
             if not filename or not _ext_ok(filename):
                 return jsonify({'success': False, 'error': 'unsupported_media'}), 415
 
-            # ตรวจขนาดไฟล์ (ถ้าวัดได้)
             try:
                 f.seek(0, os.SEEK_END); size = f.tell(); f.seek(0)
             except Exception:
@@ -248,14 +296,13 @@ def upload_images(inspection_id):
             if size is not None and size > MAX_FILE_BYTES:
                 return jsonify({'success': False, 'error': 'payload_too_large'}), 413
 
-            # เซฟไฟล์ไปที่ /upload/inspections/<inspection_id>/
             ext = filename.rsplit('.', 1)[-1].lower()
             ts  = datetime.utcnow().strftime('%Y%m%d%H%M%S%f')
             safe_name = f"{inspection_id}_{ts}.{ext}"
             path = folder / safe_name
             f.save(str(path))
 
-            rel_path = str(path.relative_to(root))
+            rel_path = str(path.relative_to(root)).replace('\\', '/')
             meta = {"original_name": filename, "saved_name": safe_name, "saved_at_utc": ts}
             cur.execute("""
                 INSERT INTO zone_inspection_image(inspection_id, image_path, captured_at, meta)
@@ -265,12 +312,7 @@ def upload_images(inspection_id):
 
         conn.commit()
         quota_remain = MAX_IMAGES_PER_ROUND - (already + len(saved))
-        return jsonify({
-            'success': True,
-            'saved': saved,
-            'quota_remain': quota_remain,
-            'skipped': skipped
-        })
+        return jsonify({'success': True, 'saved': saved, 'quota_remain': quota_remain, 'skipped': skipped})
 
     except Error as e:
         conn.rollback()
@@ -326,13 +368,8 @@ def get_detail(inspection_id):
         """, (inspection_id,))
         findings = cur.fetchall()
 
-        # โควตาเพื่อให้ client แสดงผลได้ชัดเจน
         used = len(images)
-        quota = {
-            'max': MAX_IMAGES_PER_ROUND,
-            'used': used,
-            'remain': max(0, MAX_IMAGES_PER_ROUND - used),
-        }
+        quota = {'max': MAX_IMAGES_PER_ROUND, 'used': used, 'remain': max(0, MAX_IMAGES_PER_ROUND - used)}
 
         return jsonify({'success': True, 'data': {
             'inspection': head, 'images': images, 'findings': findings, 'warnings': [], 'quota': quota
@@ -385,11 +422,12 @@ def run_analyze(inspection_id):
 
         # map class -> nutrient_code (แก้ให้ตรงกับ labels ของโมเดล)
         CLASS_TO_NUTRIENT = {
-            'nitrogen_def': 'N', 'phosphorus_def': 'P',
-            'potassium_def': 'K', 'magnesium_def': 'Mg',
-            'N': 'N', 'P': 'P', 'K': 'K', 'Mg': 'Mg',
+            'Magnesium':  'Mg',
+            'Nitrogen':   'N',
+            'Phosphorus': 'P',
+            'Potassium':  'K',
+            'nomal': 'normal'
         }
-
         def severity_from_conf(conf_pct: float) -> str:
             if conf_pct >= 85: return 'severe'
             if conf_pct >= 65: return 'moderate'
@@ -397,26 +435,36 @@ def run_analyze(inspection_id):
 
         agg = {}  # code -> {'max_conf': float, 'max_sev': str}
         for item in results:
-            preds = item.get('preds') or []
-            for p in preds:
+            for p in (item.get('preds') or []):
                 label = str(p.get('class', '')).strip()
-                conf  = float(p.get('confidence') or 0.0) * 100.0
-                code  = CLASS_TO_NUTRIENT.get(label) or CLASS_TO_NUTRIENT.get(label.lower())
+                code = CLASS_TO_NUTRIENT.get(label)
                 if not code:
                     continue
-                sev = severity_from_conf(conf)
-                if code not in agg or conf > agg[code]['max_conf']:
-                    agg[code] = {'max_conf': conf, 'max_sev': sev}
+                conf_pct = float(p.get('confidence') or 0.0) * 100.0
+                sev = severity_from_conf(conf_pct)
+                if code not in agg or conf_pct > agg[code]['max_conf']:
+                    agg[code] = {'max_conf': conf_pct, 'max_sev': sev}
 
+        # ล้าง finding เก่า + บันทึก finding ใหม่
         cur.execute("DELETE FROM zone_inspection_finding WHERE inspection_id=%s", (inspection_id,))
+        findings = []
         for code, stat in agg.items():
+            findings.append({
+                'nutrient_code': code,
+                'severity': stat['max_sev'],
+                'confidence': round(stat['max_conf'], 2),
+                'notes': None
+            })
             cur.execute("""
                 INSERT INTO zone_inspection_finding(inspection_id, nutrient_code, severity, confidence, notes)
                 VALUES(%s, %s, %s, %s, %s)
             """, (inspection_id, code, stat['max_sev'], round(stat['max_conf'], 2), None))
 
+        # ===== สร้าง/อัปเดต "คำแนะนำปุ๋ย" ตามกฎ =====
+        _upsert_recommendations(cur, inspection_id, agg)
+
         conn.commit()
-        return jsonify({'success': True, 'warnings': []})
+        return jsonify({'success': True, 'warnings': [], 'results': results, 'findings': findings})
     except Error as e:
         conn.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -478,7 +526,7 @@ def get_recommendations(inspection_id):
 # ---------- recommendations: patch status ----------
 @inspection_bp.route('/recommendations/<int:rec_id>', methods=['PATCH', 'PUT', 'OPTIONS'])
 def patch_recommendation(rec_id):
-    user, err = _authz()
+    user, err = _authz().__iter__() if False else _authz()  # keep same behavior
     if err: return err
     uid = _user_id(user)
     if uid is None:
@@ -642,7 +690,7 @@ def list_inspections():
         if year:     where.append("YEAR(zi.inspected_at) = %s"); params.append(year)
         if month:    where.append("MONTH(zi.inspected_at) = %s"); params.append(month)
         if field_id: where.append("zi.field_id = %s"); params.append(field_id)
-        if zone_id:  where.append("zi.zone_id = %s");  params.append(zone_id)
+        if zone_id:  where.append("zi.zone_id = %s"); params.append(zone_id)
         W = " AND ".join(where)
 
         cur.execute(f"""

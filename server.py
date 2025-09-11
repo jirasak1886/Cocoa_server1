@@ -15,7 +15,7 @@ app = Flask(__name__)
 # ==================== CONFIG ====================
 app.config['JWT_SECRET_KEY'] = os.environ.get("JWT_SECRET_KEY", "dev-secret-key")
 JWT_EXPIRY_DAYS = int(os.environ.get("JWT_EXPIRY_DAYS", "30"))
-# จำกัด payload ใหญ่สุด (รวม multipart) — 20MB ตามค่าเริ่มต้น
+# จำกัด payload ใหญ่สุด (รวม multipart)
 app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get("MAX_CONTENT_LENGTH_BYTES", str(20 * 1024 * 1024)))
 
 # ===== Absolute paths =====
@@ -155,7 +155,6 @@ def health_check():
         'auth_type': 'JWT Token Only',
         'token_expiry_days': JWT_EXPIRY_DAYS,
         'upload_root': str(UPLOAD_FOLDER),
-        # ไม่ตรวจ/โหลดโมเดลที่นี่แล้ว — ตรวจผ่าน /api/detect/labels แทน
         'has_inspection_routes': inspection_bp is not None,
         'blueprints_loaded': {
             'inspection': inspection_bp is not None,
@@ -198,7 +197,7 @@ def index():
     if has_detect:
         endpoints.update({
             'detect': '/api/detect',
-            'detectLabels': '/api/detect/labels',  # ใช้ endpoint นี้เพื่อเช็คโมเดล
+            'detectLabels': '/api/detect/labels',
         })
 
     has_reference = reference_bp is not None

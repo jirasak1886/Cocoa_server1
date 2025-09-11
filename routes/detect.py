@@ -8,22 +8,19 @@ bp_detect = Blueprint('detect', __name__)
 
 _MODEL = None
 _MODEL_NAMES = None
-_DEVICE = None  # <= เก็บค่าที่เลือกได้
+_DEVICE = None  # เก็บ device ที่เลือกไว้
 
 # ---------- utils: device ----------
 def _pick_device() -> str:
-    # 1) เคารพ YOLO_DEVICE ถ้าตั้งเป็นค่าเฉพาะเช่น '0' หรือ 'cpu'
     env = (os.environ.get('YOLO_DEVICE') or '').strip().lower()
     if env and env not in ('auto',):
         return env
-    # 2) auto: ถ้ามี CUDA ใช้ GPU0, ไม่งั้น cpu
     try:
         import torch
         if torch.cuda.is_available():
             return '0'
     except Exception:
         pass
-    # กันเคสตั้ง CUDA_VISIBLE_DEVICES=auto มาจากภายนอก
     if (os.environ.get('CUDA_VISIBLE_DEVICES') or '').strip().lower() == 'auto':
         os.environ.pop('CUDA_VISIBLE_DEVICES', None)
     return 'cpu'
@@ -37,33 +34,20 @@ def _uploads_root() -> Path:
 
 # ---------- utils: model path picker ----------
 def _pick_model_path(app_root: Path) -> Optional[str]:
-    """
-    เลือก path โมเดลตามลำดับความสำคัญ:
-      1) ENV: MODEL_PATH
-      2) {root}/config/model/best(1).pt  และ  best (1).pt (มี/ไม่มีช่องว่าง)
-      3) {root}/config/model/best.pt
-      4) สำรอง: {root}/model/... (บางโปรเจกต์อาจวางไว้ตรงนี้)
-    คืน path ที่มีจริงตัวแรก ถ้าไม่พบใดๆ คืน None
-    """
     env_path = (os.environ.get('MODEL_PATH') or '').strip()
-
     candidates = [
         env_path,
         str((app_root / 'config' / 'model' / 'best(1).pt').resolve()),
         str((app_root / 'config' / 'model' / 'best (1).pt').resolve()),
         str((app_root / 'config' / 'model' / 'best.pt').resolve()),
-        # สำรองโฟลเดอร์ model ที่ root เผื่อย้ายไฟล์ในอนาคต
         str((app_root / 'model' / 'best(1).pt').resolve()),
         str((app_root / 'model' / 'best (1).pt').resolve()),
         str((app_root / 'model' / 'best.pt').resolve()),
     ]
-
     for p in candidates:
         if p and Path(p).exists():
             current_app.logger.info(f"[DETECT] ✔ Using model file: {p}")
             return p
-
-    # log ช่วยดีบักว่าหาไฟล์ที่ไหนบ้าง
     for p in candidates:
         if p:
             current_app.logger.warning(f"[DETECT] ✗ Not found: {p}")
@@ -104,13 +88,12 @@ def _class_name_from_id(idx: int) -> str:
 # ---------- core predict ----------
 def predict_on_paths(abs_paths: List[str], conf_thres: float = 0.25) -> List[Dict[str, Any]]:
     model = _load_model()
-    # ใช้ _DEVICE ที่เลือกไว้เสมอ
     results = model.predict(
         abs_paths,
         verbose=False,
         conf=conf_thres,
         imgsz=int(os.environ.get('YOLO_IMGSZ', '640')),
-        device=_DEVICE,                     # <<<<<<<<<< สำคัญ
+        device=_DEVICE,
     )
 
     out: List[Dict[str, Any]] = []
