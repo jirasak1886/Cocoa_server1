@@ -6,22 +6,18 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 import jwt, os, json
 
-# หมายเหตุ: ใน server.py มีการ register blueprint ด้วย url_prefix='/api/inspections'
-# ดังนั้นที่นี่ "ไม่ต้อง" ใส่ url_prefix ซ้ำ
+from routes.detect import predict_on_paths  # ใช้โมเดลจาก detect.py
+
 inspection_bp = Blueprint('inspection', __name__)
 
-# ===================== Constants / Config =====================
-# สถานะรอบตรวจตามสคีมาปัจจุบัน
 STATUS_OPEN = 'pending'
 STATUS_DONE = 'completed'
-STATUS_CANCELLED = 'cancelled'
 
-# อัปโหลดรูป
 ALLOWED_EXTS = {'jpg', 'jpeg', 'png', 'bmp', 'webp'}
-MAX_FILE_BYTES = 20 * 1024 * 1024   # 20 MB/ไฟล์
-MAX_IMAGES_PER_ROUND = 5            # โควตาต่อรอบ (สอดคล้อง Trigger DB ถ้ามี)
+MAX_FILE_BYTES = 20 * 1024 * 1024
+MAX_IMAGES_PER_ROUND = 5  # รวมทั้งหมดต่อ inspection (ให้ตรงตาม Trigger ใน DB)
 
-# ========================== Helpers ==========================
+# ---------- helpers ----------
 def _get_user():
     auth = request.headers.get('Authorization', '')
     if not auth.startswith('Bearer '):
@@ -33,13 +29,11 @@ def _get_user():
         return None
 
 def _user_id(u):
-    """รองรับคีย์ user_id/sub/uid ใน JWT payload"""
     if not isinstance(u, dict):
         return None
     return u.get('user_id') or u.get('sub') or u.get('uid')
 
 def _authz():
-    # จบ CORS preflight ทันที
     if request.method == 'OPTIONS':
         return None, ('', 204), 204
     u = _get_user()
@@ -59,7 +53,6 @@ def _parse_yyyy_mm_dd(s):
         return None
 
 def _normalize_range(dfrom_str, dto_str):
-    """รับ from/to เป็น YYYY-MM-DD → คืน (start_dt, end_dt) แบบ datetime (end_dt inclusive 23:59:59)"""
     start_dt = end_dt = None
     dfrom = _parse_yyyy_mm_dd(dfrom_str) if dfrom_str else None
     dto   = _parse_yyyy_mm_dd(dto_str)   if dto_str else None
@@ -70,15 +63,13 @@ def _normalize_range(dfrom_str, dto_str):
     return start_dt, end_dt
 
 def _uploads_root() -> Path:
-    # ใช้ค่าใน ENV (server.py ตั้ง os.environ['UPLOAD_ROOT'] ไว้แล้ว)
+    # ให้ ENV มีลำดับความสำคัญสูงสุด
     env_root = os.environ.get('UPLOAD_ROOT', '').strip()
     if env_root:
         return Path(env_root)
-    # fallback: ใช้ภายในแอป
-    root = current_app.config.get('UPLOAD_FOLDER')
-    if root:
-        return Path(root)
-    return Path(current_app.root_path) / 'static' / 'uploads'
+    # ค่าเริ่มต้น: เก็บนอก static เพื่อความยืดหยุ่น (แนะนำ)
+    # หากโปรเจ็กต์เดิมใช้ static/uploads ให้ปรับตรงนี้กลับได้
+    return Path(current_app.root_path) / 'upload'
 
 def _ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
@@ -86,12 +77,11 @@ def _ensure_dir(p: Path):
 def _ext_ok(filename: str) -> bool:
     return '.' in filename and filename.rsplit('.', 1)[-1].lower() in ALLOWED_EXTS
 
-# ======================= A) Start Round =======================
+# ---------- start round ----------
 @inspection_bp.route('/start', methods=['POST', 'OPTIONS'])
 def start_round():
     user, err, _ = _authz()
     if err: return err
-
     uid = _user_id(user)
     if uid is None:
         return jsonify({'success': False, 'error': 'unauthorized'}), 401
@@ -100,7 +90,6 @@ def start_round():
     field_id = body.get('field_id')
     zone_id  = body.get('zone_id')
     notes    = (body.get('notes') or '').strip() or None
-
     if not field_id or not zone_id:
         return jsonify({'success': False, 'error': 'missing_params'}), 400
 
@@ -110,15 +99,13 @@ def start_round():
     try:
         cur = conn.cursor(dictionary=True)
 
-        # ตรวจสิทธิ์เป็นเจ้าของ field
-        cur.execute("SELECT user_id FROM field WHERE field_id = %s", (field_id,))
+        cur.execute("SELECT user_id FROM field WHERE field_id=%s", (field_id,))
         owner = cur.fetchone()
         if not owner:
             return jsonify({'success': False, 'error': 'field_not_found'}), 404
         if owner['user_id'] != uid:
             return jsonify({'success': False, 'error': 'forbidden'}), 403
 
-        # idempotent: ถ้ามีรอบที่ยังเปิดอยู่แล้ว (pending)
         cur.execute("""
             SELECT inspection_id, round_no
             FROM zone_inspection
@@ -130,7 +117,6 @@ def start_round():
             return jsonify({'success': True, 'idempotent': True,
                             'inspection_id': exist['inspection_id'], 'round_no': exist['round_no']})
 
-        # หา round ล่าสุด
         cur.execute("""
             SELECT MAX(round_no) AS max_round
             FROM zone_inspection
@@ -139,14 +125,12 @@ def start_round():
         maxr = cur.fetchone()['max_round'] or 0
         next_round = int(maxr) + 1
 
-        # สร้างรอบใหม่ (status=pending)
         cur.execute("""
             INSERT INTO zone_inspection(field_id, zone_id, round_no, status, notes, inspected_at)
             VALUES(%s, %s, %s, %s, %s, NOW())
         """, (field_id, zone_id, next_round, STATUS_OPEN, notes))
         conn.commit()
         new_id = cur.lastrowid
-
         return jsonify({'success': True, 'inspection_id': new_id, 'round_no': next_round})
     except Error as e:
         conn.rollback()
@@ -157,22 +141,17 @@ def start_round():
         except:
             pass
 
-# ===================== B) Upload Images =======================
+# ---------- upload images ----------
 @inspection_bp.route('/<int:inspection_id>/images', methods=['POST', 'OPTIONS'])
 def upload_images(inspection_id):
     user, err, _ = _authz()
     if err: return err
-
     uid = _user_id(user)
     if uid is None:
         return jsonify({'success': False, 'error': 'unauthorized'}), 401
 
-    # เช็ค multipart
     if not request.files:
         return jsonify({'success': False, 'error': 'no_files', 'message': 'No files in multipart/form-data'}), 400
-
-    # debug เล็กน้อย
-    current_app.logger.debug(f"[upload_images] content-type={request.content_type}, files={list(request.files.keys())}")
 
     conn = get_db_connection()
     if not conn:
@@ -180,7 +159,7 @@ def upload_images(inspection_id):
     try:
         cur = conn.cursor(dictionary=True)
 
-        # ตรวจสิทธิ์+สถานะ
+        # ตรวจสิทธิ์ + สถานะรอบ
         cur.execute("""
             SELECT zi.inspection_id, zi.field_id, zi.zone_id, zi.status, f.user_id
             FROM zone_inspection zi
@@ -195,25 +174,35 @@ def upload_images(inspection_id):
         if it['status'] != STATUS_OPEN:
             return jsonify({'success': False, 'error': 'closed_round'}), 400
 
-        # นับรูปเดิม
+        # นับรูปที่มีอยู่แล้วใน "รอบนี้"
         cur.execute("SELECT COUNT(*) AS c FROM zone_inspection_image WHERE inspection_id=%s", (inspection_id,))
         already = cur.fetchone()['c'] or 0
+
+        # โควตาที่ยังได้ (รวมต่อรอบ ≤ 5)
         remain = max(0, MAX_IMAGES_PER_ROUND - already)
         if remain == 0:
-            return jsonify({'success': False, 'error': 'quota_full', 'exist': already, 'max': MAX_IMAGES_PER_ROUND}), 400
+            return jsonify({
+                'success': False,
+                'error': 'quota_full',
+                'exist': already,
+                'max': MAX_IMAGES_PER_ROUND
+            }), 400
 
         saved = []
         root = _uploads_root()
         folder = root / 'inspections' / str(inspection_id)
         _ensure_dir(folder)
 
+        # รับไฟล์จาก multipart
         files = list(request.files.values())
+
+        # เซฟได้มากสุดเท่ากับ "remain" (ถ้าแนบมาเกิน เราจะรับแค่เท่าที่เหลือ)
         for f in files[:remain]:
             filename = f.filename or ''
             if not filename or not _ext_ok(filename):
                 return jsonify({'success': False, 'error': 'unsupported_media'}), 415
 
-            # ขนาดไฟล์
+            # ตรวจขนาดไฟล์
             try:
                 f.seek(0, os.SEEK_END); size = f.tell(); f.seek(0)
             except Exception:
@@ -221,6 +210,7 @@ def upload_images(inspection_id):
             if size is not None and size > MAX_FILE_BYTES:
                 return jsonify({'success': False, 'error': 'payload_too_large'}), 413
 
+            # เซฟไฟล์
             ext = filename.rsplit('.', 1)[-1].lower()
             ts  = datetime.utcnow().strftime('%Y%m%d%H%M%S%f')
             safe_name = f"{inspection_id}_{ts}.{ext}"
@@ -228,42 +218,30 @@ def upload_images(inspection_id):
             f.save(str(path))
 
             rel_path = str(path.relative_to(root))
-            meta = {
-                "original_name": filename,
-                "saved_name": safe_name,
-                "saved_at_utc": ts
-            }
-
-            # ใส่ตามคอลัมน์จริงในสคีมา: image_path, captured_at, meta(JSON)
+            meta = {"original_name": filename, "saved_name": safe_name, "saved_at_utc": ts}
             cur.execute("""
                 INSERT INTO zone_inspection_image(inspection_id, image_path, captured_at, meta)
                 VALUES(%s, %s, NOW(), %s)
             """, (inspection_id, rel_path, json.dumps(meta, ensure_ascii=False)))
-
             saved.append({'file': safe_name, 'path': rel_path})
 
         conn.commit()
         quota_remain = MAX_IMAGES_PER_ROUND - (already + len(saved))
         return jsonify({'success': True, 'saved': saved, 'quota_remain': quota_remain})
     except Error as e:
-        # เผื่อชน Trigger จำกัด 5 รูป/รอบ ให้แปลงเป็น quota_full เพื่อ UX ที่ดี
-        msg = str(e)
-        if '45000' in msg or 'quota' in msg.lower() or 'limit' in msg.lower():
-            return jsonify({'success': False, 'error': 'quota_full'}), 400
         conn.rollback()
-        return jsonify({'success': False, 'error': msg}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
     finally:
         try:
             cur.close(); conn.close()
         except:
             pass
 
-# ==================== C) Inspection Detail ====================
+# ---------- inspection detail ----------
 @inspection_bp.route('/<int:inspection_id>', methods=['GET', 'OPTIONS'])
 def get_detail(inspection_id):
     user, err, _ = _authz()
     if err: return err
-
     uid = _user_id(user)
     if uid is None:
         return jsonify({'success': False, 'error': 'unauthorized'}), 401
@@ -274,7 +252,6 @@ def get_detail(inspection_id):
     try:
         cur = conn.cursor(dictionary=True)
 
-        # ตรวจสิทธิ์
         cur.execute("""
             SELECT zi.*, z.zone_name, f.field_name, f.user_id
             FROM zone_inspection zi
@@ -288,7 +265,6 @@ def get_detail(inspection_id):
         if head['user_id'] != uid:
             return jsonify({'success': False, 'error': 'forbidden'}), 403
 
-        # รูปภาพ (ใช้คอลัมน์จริง)
         cur.execute("""
             SELECT image_id, image_path, captured_at, meta
             FROM zone_inspection_image
@@ -297,26 +273,17 @@ def get_detail(inspection_id):
         """, (inspection_id,))
         images = cur.fetchall()
 
-        # findings (ใช้ confidence)
         cur.execute("""
-            SELECT nutrient_code, severity, confidence, notes
+            SELECT finding_id, nutrient_code, severity, confidence, notes
             FROM zone_inspection_finding
             WHERE inspection_id = %s
             ORDER BY finding_id
         """, (inspection_id,))
         findings = cur.fetchall()
 
-        warnings = []  # เพิ่มตามกติกาที่ต้องการ
-
-        return jsonify({
-            'success': True,
-            'data': {
-                'inspection': head,
-                'images': images,
-                'findings': findings,
-                'warnings': warnings
-            }
-        })
+        return jsonify({'success': True, 'data': {
+            'inspection': head, 'images': images, 'findings': findings, 'warnings': []
+        }})
     except Error as e:
         return jsonify({'success': False, 'error': str(e)}), 500
     finally:
@@ -325,12 +292,11 @@ def get_detail(inspection_id):
         except:
             pass
 
-# ====================== D) Run Analyze =======================
+# ---------- analyze (call model from detect.py) ----------
 @inspection_bp.route('/<int:inspection_id>/analyze', methods=['POST', 'OPTIONS'])
 def run_analyze(inspection_id):
     user, err, _ = _authz()
     if err: return err
-
     uid = _user_id(user)
     if uid is None:
         return jsonify({'success': False, 'error': 'unauthorized'}), 401
@@ -341,7 +307,6 @@ def run_analyze(inspection_id):
     try:
         cur = conn.cursor(dictionary=True)
 
-        # ตรวจสิทธิ์
         cur.execute("""
             SELECT zi.*, f.user_id
             FROM zone_inspection zi
@@ -354,26 +319,51 @@ def run_analyze(inspection_id):
         if it['user_id'] != uid:
             return jsonify({'success': False, 'error': 'forbidden'}), 403
 
-        # ต้องมีรูปอย่างน้อย 1
-        cur.execute("SELECT COUNT(*) AS c FROM zone_inspection_image WHERE inspection_id=%s", (inspection_id,))
-        num = cur.fetchone()['c'] or 0
-        if num == 0:
+        cur.execute("SELECT image_path FROM zone_inspection_image WHERE inspection_id=%s", (inspection_id,))
+        imgs = [r['image_path'] for r in cur.fetchall()]
+        if not imgs:
             return jsonify({'success': False, 'error': 'no_images'}), 400
 
-        # TODO: เรียกโมเดลจริง
-        # ลบผลเก่า + ใส่ mock ให้ตรงสคีมา (confidence เป็นตัวเลข)
-        cur.execute("DELETE FROM zone_inspection_finding WHERE inspection_id=%s", (inspection_id,))
-        cur.execute("""
-            INSERT INTO zone_inspection_finding(inspection_id, nutrient_code, severity, confidence, notes)
-            VALUES(%s, %s, %s, %s, %s)
-        """, (inspection_id, 'N', 'moderate', 82.00, 'auto-generated'))
+        root = _uploads_root()
+        abs_paths = [str((root / rel).resolve()) for rel in imgs]
 
-        # ไม่ปิดรอบอัตโนมัติ เพื่อให้อัปโหลดรูป/แก้ไขต่อได้
-        # ถ้าต้องการปิดเมื่อเสร็จจริง ค่อยทำ endpoint แยกเพื่อ set status=completed
+        # เรียกโมเดล
+        results = predict_on_paths(abs_paths, conf_thres=0.25)
+
+        # map class -> nutrient_code (แก้ให้ตรงกับ labels ของโมเดล)
+        CLASS_TO_NUTRIENT = {
+            'nitrogen_def': 'N', 'phosphorus_def': 'P',
+            'potassium_def': 'K', 'magnesium_def': 'Mg',
+            'N': 'N', 'P': 'P', 'K': 'K', 'Mg': 'Mg',
+        }
+
+        def severity_from_conf(conf_pct: float) -> str:
+            if conf_pct >= 85: return 'severe'
+            if conf_pct >= 65: return 'moderate'
+            return 'mild'
+
+        agg = {}  # code -> {'max_conf': float, 'max_sev': str}
+        for item in results:
+            preds = item.get('preds') or []
+            for p in preds:
+                label = str(p.get('class', '')).strip()
+                conf  = float(p.get('confidence') or 0.0) * 100.0
+                code  = CLASS_TO_NUTRIENT.get(label) or CLASS_TO_NUTRIENT.get(label.lower())
+                if not code:
+                    continue
+                sev = severity_from_conf(conf)
+                if code not in agg or conf > agg[code]['max_conf']:
+                    agg[code] = {'max_conf': conf, 'max_sev': sev}
+
+        cur.execute("DELETE FROM zone_inspection_finding WHERE inspection_id=%s", (inspection_id,))
+        for code, stat in agg.items():
+            cur.execute("""
+                INSERT INTO zone_inspection_finding(inspection_id, nutrient_code, severity, confidence, notes)
+                VALUES(%s, %s, %s, %s, %s)
+            """, (inspection_id, code, stat['max_sev'], round(stat['max_conf'], 2), None))
 
         conn.commit()
-        warnings = []
-        return jsonify({'success': True, 'warnings': warnings})
+        return jsonify({'success': True, 'warnings': []})
     except Error as e:
         conn.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -383,12 +373,11 @@ def run_analyze(inspection_id):
         except:
             pass
 
-# ========== 1) Recommendations of an inspection ==========
+# ---------- recommendations: list ----------
 @inspection_bp.route('/<int:inspection_id>/recommendations', methods=['GET', 'OPTIONS'])
 def get_recommendations(inspection_id):
     user, err, _ = _authz()
     if err: return err
-
     uid = _user_id(user)
     if uid is None:
         return jsonify({'success': False, 'error': 'unauthorized'}), 401
@@ -399,7 +388,6 @@ def get_recommendations(inspection_id):
     try:
         cur = conn.cursor(dictionary=True)
 
-        # ตรวจสิทธิ์ความเป็นเจ้าของ
         cur.execute("""
             SELECT f.user_id
             FROM zone_inspection zi
@@ -412,7 +400,6 @@ def get_recommendations(inspection_id):
         if own['user_id'] != uid:
             return jsonify({'success': False, 'error': 'forbidden'}), 403
 
-        # รายการคำแนะนำ + ข้อมูลเพิ่มเติม
         cur.execute("""
             SELECT r.recommendation_id, r.inspection_id, r.fertilizer_id, r.nutrient_code,
                    r.recommendation_text, r.rate_per_area, r.application_method,
@@ -426,7 +413,6 @@ def get_recommendations(inspection_id):
             ORDER BY r.recommendation_id
         """, (inspection_id,))
         rows = cur.fetchall()
-
         return jsonify({'success': True, 'data': rows, 'count': len(rows)})
     except Error as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -436,18 +422,18 @@ def get_recommendations(inspection_id):
         except:
             pass
 
+# ---------- recommendations: patch status ----------
 @inspection_bp.route('/recommendations/<int:rec_id>', methods=['PATCH', 'PUT', 'OPTIONS'])
 def patch_recommendation(rec_id):
     user, err, _ = _authz()
     if err: return err
-
     uid = _user_id(user)
     if uid is None:
         return jsonify({'success': False, 'error': 'unauthorized'}), 401
 
     body = _ensure_json()
-    status = (body.get('status') or '').strip().lower()  # suggested|applied|skipped
-    applied_date = body.get('applied_date')  # 'YYYY-MM-DD' หรือ None
+    status = (body.get('status') or '').strip().lower()
+    applied_date = body.get('applied_date')
 
     if status not in ('suggested', 'applied', 'skipped'):
         return jsonify({'success': False, 'error': 'bad_status'}), 400
@@ -468,7 +454,6 @@ def patch_recommendation(rec_id):
     try:
         cur = conn.cursor()
 
-        # ตรวจสิทธิ์
         cur.execute("""
             SELECT f.user_id
             FROM zone_inspection_recommendation r
@@ -484,8 +469,7 @@ def patch_recommendation(rec_id):
 
         cur.execute("""
             UPDATE zone_inspection_recommendation
-               SET status = %s,
-                   applied_date = %s
+               SET status = %s, applied_date = %s
              WHERE recommendation_id = %s
         """, (status, applied_date, rec_id))
         conn.commit()
@@ -499,15 +483,11 @@ def patch_recommendation(rec_id):
         except:
             pass
 
-# ========== 2) History (monthly/yearly buckets) ==========
+# ---------- history ----------
 @inspection_bp.route('/history', methods=['GET', 'OPTIONS'])
 def inspection_history():
-    """
-    GET /api/inspections/history?group=month|year&from=YYYY-MM-DD&to=YYYY-MM-DD&field_id=&zone_id=
-    """
     user, err, _ = _authz()
     if err: return err
-
     uid = _user_id(user)
     if uid is None:
         return jsonify({'success': False, 'error': 'unauthorized'}), 401
@@ -517,8 +497,7 @@ def inspection_history():
         group = 'month'
 
     field_id = request.args.get('field_id', type=int)
-    zone_id  = request.args.get('zone_id',  type=int)
-
+    zone_id  = request.args.get('zone_id', type=int)
     start_dt, end_dt = _normalize_range(request.args.get('from'), request.args.get('to'))
     bucket_sql = "DATE_FORMAT(zi.inspected_at, '%Y-%m')" if group == 'month' else "DATE_FORMAT(zi.inspected_at, '%Y')"
 
@@ -539,7 +518,6 @@ def inspection_history():
             where.append("zi.zone_id = %s"); params.append(zone_id)
         W = " AND ".join(where)
 
-        # จำนวนรอบตรวจต่อ bucket
         cur.execute(f"""
             SELECT {bucket_sql} AS bucket, COUNT(*) AS inspections
             FROM zone_inspection zi
@@ -550,7 +528,6 @@ def inspection_history():
         """, params)
         buckets = cur.fetchall()
 
-        # จำนวน findings ต่อ bucket
         cur.execute(f"""
             SELECT {bucket_sql} AS bucket, COUNT(*) AS findings
             FROM zone_inspection zi
@@ -562,7 +539,6 @@ def inspection_history():
         """, params)
         fcounts = {r['bucket']: r['findings'] for r in cur.fetchall()}
 
-        # ธาตุยอดฮิต (ทั้งช่วง)
         cur.execute(f"""
             SELECT zif.nutrient_code, COUNT(*) AS cnt
             FROM zone_inspection zi
@@ -587,15 +563,11 @@ def inspection_history():
         except:
             pass
 
-# ========== 3) List inspections (paged/filter) ==========
+# ---------- list ----------
 @inspection_bp.route('', methods=['GET', 'OPTIONS'])
 def list_inspections():
-    """
-    GET /api/inspections?page=1&page_size=20&year=2025&month=9&field_id=&zone_id=
-    """
     user, err, _ = _authz()
     if err: return err
-
     uid = _user_id(user)
     if uid is None:
         return jsonify({'success': False, 'error': 'unauthorized'}), 401

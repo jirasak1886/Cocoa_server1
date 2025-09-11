@@ -1,5 +1,5 @@
 # server.py
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, current_app
 from flask_cors import CORS, cross_origin
 import os, logging, jwt
 from datetime import datetime, timedelta
@@ -17,7 +17,7 @@ app.config['JWT_SECRET_KEY'] = os.environ.get("JWT_SECRET_KEY", "dev-secret-key"
 JWT_EXPIRY_DAYS = int(os.environ.get("JWT_EXPIRY_DAYS", "30"))
 app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get("MAX_CONTENT_LENGTH_BYTES", str(20 * 1024 * 1024)))
 
-# ===== Absolute paths (robust) =====
+# ===== Absolute paths =====
 APP_ROOT = Path(app.root_path)
 
 # UPLOAD_ROOT
@@ -26,11 +26,11 @@ UPLOAD_FOLDER = (Path(env_upload) if env_upload else (APP_ROOT / 'static' / 'upl
 UPLOAD_FOLDER = UPLOAD_FOLDER.resolve(strict=False)
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 
-# MODEL_PATH — รองรับหลาย candidate (รวม best (1).pt)
+# MODEL_PATH — รองรับหลาย candidate
 candidates = [
-    os.environ.get('MODEL_PATH', '').strip(),      # ENV มาก่อน
-    str(APP_ROOT / 'model' / 'best (1).pt'),       # ชื่อไฟล์ของคุณ
-    str(APP_ROOT / 'model' / 'best.pt'),           # สำรองชื่อมาตรฐาน
+    os.environ.get('MODEL_PATH', '').strip(),         # ENV มาก่อน
+    str(APP_ROOT / 'model' / 'best(1).pt'),          # ไฟล์ของคุณ
+    str(APP_ROOT / 'model' / 'best.pt'),              # สำรอง
 ]
 MODEL_PATH_ABS = None
 for c in candidates:
@@ -41,7 +41,7 @@ for c in candidates:
         MODEL_PATH_ABS = p
         break
 if MODEL_PATH_ABS is None:
-    MODEL_PATH_ABS = (APP_ROOT / 'model' / 'best (1).pt').expanduser().resolve(strict=False)
+    MODEL_PATH_ABS = (APP_ROOT / 'model' / 'best.pt').expanduser().resolve(strict=False)
 
 # เผยแพร่ให้ blueprint ใช้
 os.environ['UPLOAD_ROOT'] = str(UPLOAD_FOLDER)
@@ -55,14 +55,14 @@ if MODEL_PATH_ABS.is_file():
 else:
     logger.error(f"[BOOT] MODEL_PATH not found: {MODEL_PATH_ABS}")
 
-# CORS: เปิดทุกเส้นทาง
+# CORS
 CORS(
     app,
     resources={r"/*": {"origins": "*"}},
     supports_credentials=False,
     allow_headers=["Authorization", "Content-Type", "X-Requested-With", "Accept"],
     expose_headers=["Authorization"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"]  # Added PATCH
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"]
 )
 
 # ==================== OPTIONAL BLUEPRINTS ====================
@@ -76,7 +76,6 @@ try:
     logger.info("✅ Loaded routes.inspection successfully")
 except Exception as e:
     logger.error(f"❌ Failed to load routes.inspection: {e}")
-    logger.error("Make sure routes/inspection.py exists and has no syntax errors")
 
 try:
     from routes.detect import bp_detect as _bp_detect
@@ -121,7 +120,6 @@ def get_token_from_header():
     return None
 
 def require_auth(f):
-    from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
         if request.method == "OPTIONS":
@@ -151,17 +149,14 @@ def after_request(response):
     return response
 
 # ==================== BLUEPRINTS REGISTRATION ====================
-# Always register base blueprints
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(field_zone_bp, url_prefix='/api')
 
-# Register optional blueprints with proper error handling
 if inspection_bp is not None:
     app.register_blueprint(inspection_bp, url_prefix='/api/inspections')
     logger.info("✅ Registered inspection_bp at /api/inspections")
 else:
     logger.error("❌ inspection_bp is None - routes will not be available!")
-    logger.error("Check routes/inspection.py for import errors")
 
 if bp_detect is not None:
     app.register_blueprint(bp_detect, url_prefix='/api/detect')
@@ -194,11 +189,25 @@ def health_check():
 @app.route('/health/model', methods=['GET'])
 @cross_origin(origins="*")
 def health_model():
+    def _pick_device():
+        env = (os.environ.get('YOLO_DEVICE') or '').strip().lower()
+        if env and env not in ('auto',):
+            return env
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return '0'
+        except Exception:
+            pass
+        if (os.environ.get('CUDA_VISIBLE_DEVICES') or '').strip().lower() == 'auto':
+            os.environ.pop('CUDA_VISIBLE_DEVICES', None)
+        return 'cpu'
+
     try:
         from ultralytics import YOLO
+        device = _pick_device()
         m = YOLO(str(MODEL_PATH_ABS))
         names = getattr(m, 'names', None)
-        device = os.environ.get('YOLO_DEVICE', 'auto')
         return jsonify({
             'success': True,
             'model_loaded': True,
@@ -209,6 +218,7 @@ def health_model():
     except Exception as e:
         return jsonify({'success': False, 'model_loaded': False, 'error': str(e), 'model_path': str(MODEL_PATH_ABS)}), 500
 
+
 @app.route('/', methods=['GET'])
 @cross_origin(origins="*")
 def index():
@@ -217,69 +227,37 @@ def index():
         'authLogin': '/api/auth/login',
         'authRegister': '/api/auth/register',
         'authValidate': '/api/auth/validate',
-
         'health': '/health',
-        # ใส่ healthModel ก็ต่อเมื่อคุณมี route จริงเท่านั้น
         'healthModel': '/health/model',
-
         'fields': '/api/fields',
         'fieldDetail': '/api/fields/{field_id}',
         'fieldZones': '/api/fields/{field_id}/zones',
-
         'zones': '/api/zones',
         'zoneDetail': '/api/zones/{zone_id}',
-
         'marks': '/api/zones/{zone_id}/marks',
     }
 
-    # แสดงปลายทางของ inspections ถ้ามีโหลด blueprint แล้วจริง
-    try:
-        has_inspection = inspection_bp is not None  # ต้องมีตัวแปรนี้ในสโคปไฟล์ server.py
-    except NameError:
-        has_inspection = False
-
+    has_inspection = inspection_bp is not None
     if has_inspection:
         endpoints.update({
-            # core list/detail
             'inspections': '/api/inspections',
             'inspectionDetail': '/api/inspections/{inspection_id}',
-
-            # start / images / analyze (ใช้โดยแอป)
             'inspectionStart': '/api/inspections/start',
             'inspectionImages': '/api/inspections/{inspection_id}/images',
             'inspectionAnalyze': '/api/inspections/{inspection_id}/analyze',
-
-            # history + recommendations
             'inspectionHistory': '/api/inspections/history',
             'inspectionRecommendations': '/api/inspections/{inspection_id}/recommendations',
             'recommendationPatch': '/api/inspections/recommendations/{rec_id}',
         })
 
-    # detect (โมดูลโมเดล)
-    try:
-        has_detect = bp_detect is not None
-    except NameError:
-        has_detect = False
-
+    has_detect = bp_detect is not None
     if has_detect:
-        endpoints.update({
-            'detect': '/api/detect',
-            'detectLabels': '/api/detect/labels',
-        })
+        endpoints.update({'detect': '/api/detect', 'detectLabels': '/api/detect/labels'})
 
-    # reference (พวก nutrients/fertilizers)
-    try:
-        has_reference = reference_bp is not None
-    except NameError:
-        has_reference = False
-
+    has_reference = reference_bp is not None
     if has_reference:
-        endpoints.update({
-            'nutrients': '/api/nutrients',
-            'fertilizers': '/api/fertilizers',
-        })
+        endpoints.update({'nutrients': '/api/nutrients', 'fertilizers': '/api/fertilizers'})
 
-    # อ่านวันหมดอายุ token จาก config (fallback = 30)
     token_expiry_days = int(current_app.config.get('JWT_EXPIRY_DAYS', 30))
 
     return jsonify({
@@ -294,7 +272,6 @@ def index():
             'reference': 'loaded' if has_reference else 'not_loaded',
         },
     })
-
 
 @app.route('/api/test/protected', methods=['GET'])
 @require_auth
@@ -358,11 +335,10 @@ if __name__ == '__main__':
     logger.info(f"JWT token expiry: {JWT_EXPIRY_DAYS} days")
     logger.info(f"UPLOAD_ROOT={UPLOAD_FOLDER}")
     logger.info(f"MODEL_PATH={MODEL_PATH_ABS}")
-    
-    # Log blueprint registration status
-    logger.info(f"Blueprint status:")
+
+    logger.info("Blueprint status:")
     logger.info(f"  - inspection_bp: {'✅ LOADED' if inspection_bp is not None else '❌ FAILED'}")
     logger.info(f"  - bp_detect: {'✅ LOADED' if bp_detect is not None else '⚠️ NOT LOADED'}")
     logger.info(f"  - reference_bp: {'✅ LOADED' if reference_bp is not None else '⚠️ NOT LOADED'}")
-    
+
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', '5000')), debug=True, threaded=True, use_reloader=False)
