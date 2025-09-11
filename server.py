@@ -15,45 +15,23 @@ app = Flask(__name__)
 # ==================== CONFIG ====================
 app.config['JWT_SECRET_KEY'] = os.environ.get("JWT_SECRET_KEY", "dev-secret-key")
 JWT_EXPIRY_DAYS = int(os.environ.get("JWT_EXPIRY_DAYS", "30"))
+# จำกัด payload ใหญ่สุด (รวม multipart) — 20MB ตามค่าเริ่มต้น
 app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get("MAX_CONTENT_LENGTH_BYTES", str(20 * 1024 * 1024)))
 
 # ===== Absolute paths =====
 APP_ROOT = Path(app.root_path)
 
-# UPLOAD_ROOT
+# UPLOAD_ROOT (เผยแพร่ให้ blueprint อื่นใช้)
 env_upload = os.environ.get('UPLOAD_ROOT', '').strip()
 UPLOAD_FOLDER = (Path(env_upload) if env_upload else (APP_ROOT / 'static' / 'uploads')).expanduser()
 UPLOAD_FOLDER = UPLOAD_FOLDER.resolve(strict=False)
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
-
-# MODEL_PATH — รองรับหลาย candidate
-candidates = [
-    os.environ.get('MODEL_PATH', '').strip(),         # ENV มาก่อน
-    str(APP_ROOT / 'model' / 'best(1).pt'),          # ไฟล์ของคุณ
-    str(APP_ROOT / 'model' / 'best.pt'),              # สำรอง
-]
-MODEL_PATH_ABS = None
-for c in candidates:
-    if not c:
-        continue
-    p = Path(c).expanduser().resolve(strict=False)
-    if p.is_file():
-        MODEL_PATH_ABS = p
-        break
-if MODEL_PATH_ABS is None:
-    MODEL_PATH_ABS = (APP_ROOT / 'model' / 'best.pt').expanduser().resolve(strict=False)
-
-# เผยแพร่ให้ blueprint ใช้
 os.environ['UPLOAD_ROOT'] = str(UPLOAD_FOLDER)
-os.environ['MODEL_PATH']  = str(MODEL_PATH_ABS)
 
 # Logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-if MODEL_PATH_ABS.is_file():
-    logger.info(f"[BOOT] MODEL_PATH OK: {MODEL_PATH_ABS}")
-else:
-    logger.error(f"[BOOT] MODEL_PATH not found: {MODEL_PATH_ABS}")
+logger.info(f"[BOOT] UPLOAD_ROOT = {UPLOAD_FOLDER}")
 
 # CORS
 CORS(
@@ -137,7 +115,7 @@ def require_auth(f):
 # ==================== MIDDLEWARE ====================
 @app.before_request
 def before_request():
-    if request.endpoint in ['static', 'health_check', 'health_model', 'index', 'list_routes']:
+    if request.endpoint in ['static', 'health_check', 'index', 'list_routes']:
         return
     logger.debug(f"=== REQUEST {request.method} {request.url} ===")
 
@@ -177,7 +155,7 @@ def health_check():
         'auth_type': 'JWT Token Only',
         'token_expiry_days': JWT_EXPIRY_DAYS,
         'upload_root': str(UPLOAD_FOLDER),
-        'model_path': str(MODEL_PATH_ABS),
+        # ไม่ตรวจ/โหลดโมเดลที่นี่แล้ว — ตรวจผ่าน /api/detect/labels แทน
         'has_inspection_routes': inspection_bp is not None,
         'blueprints_loaded': {
             'inspection': inspection_bp is not None,
@@ -185,39 +163,6 @@ def health_check():
             'reference': reference_bp is not None,
         }
     })
-
-@app.route('/health/model', methods=['GET'])
-@cross_origin(origins="*")
-def health_model():
-    def _pick_device():
-        env = (os.environ.get('YOLO_DEVICE') or '').strip().lower()
-        if env and env not in ('auto',):
-            return env
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return '0'
-        except Exception:
-            pass
-        if (os.environ.get('CUDA_VISIBLE_DEVICES') or '').strip().lower() == 'auto':
-            os.environ.pop('CUDA_VISIBLE_DEVICES', None)
-        return 'cpu'
-
-    try:
-        from ultralytics import YOLO
-        device = _pick_device()
-        m = YOLO(str(MODEL_PATH_ABS))
-        names = getattr(m, 'names', None)
-        return jsonify({
-            'success': True,
-            'model_loaded': True,
-            'model_path': str(MODEL_PATH_ABS),
-            'num_classes': len(names) if isinstance(names, dict) else None,
-            'device': device
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'model_loaded': False, 'error': str(e), 'model_path': str(MODEL_PATH_ABS)}), 500
-
 
 @app.route('/', methods=['GET'])
 @cross_origin(origins="*")
@@ -228,7 +173,6 @@ def index():
         'authRegister': '/api/auth/register',
         'authValidate': '/api/auth/validate',
         'health': '/health',
-        'healthModel': '/health/model',
         'fields': '/api/fields',
         'fieldDetail': '/api/fields/{field_id}',
         'fieldZones': '/api/fields/{field_id}/zones',
@@ -252,7 +196,10 @@ def index():
 
     has_detect = bp_detect is not None
     if has_detect:
-        endpoints.update({'detect': '/api/detect', 'detectLabels': '/api/detect/labels'})
+        endpoints.update({
+            'detect': '/api/detect',
+            'detectLabels': '/api/detect/labels',  # ใช้ endpoint นี้เพื่อเช็คโมเดล
+        })
 
     has_reference = reference_bp is not None
     if has_reference:
@@ -271,6 +218,7 @@ def index():
             'detect': 'loaded' if has_detect else 'not_loaded',
             'reference': 'loaded' if has_reference else 'not_loaded',
         },
+        'notes': 'Model loading & checking are handled in /api/detect/* routes.'
     })
 
 @app.route('/api/test/protected', methods=['GET'])
@@ -334,7 +282,6 @@ if __name__ == '__main__':
     logger.info("Starting Flask server with JWT-only authentication...")
     logger.info(f"JWT token expiry: {JWT_EXPIRY_DAYS} days")
     logger.info(f"UPLOAD_ROOT={UPLOAD_FOLDER}")
-    logger.info(f"MODEL_PATH={MODEL_PATH_ABS}")
 
     logger.info("Blueprint status:")
     logger.info(f"  - inspection_bp: {'✅ LOADED' if inspection_bp is not None else '❌ FAILED'}")
