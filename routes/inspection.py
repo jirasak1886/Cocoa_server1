@@ -15,11 +15,9 @@ STATUS_DONE = 'completed'
 
 ALLOWED_EXTS = {'jpg', 'jpeg', 'png', 'bmp', 'webp'}
 MAX_FILE_BYTES = 20 * 1024 * 1024
-
-# ========== โควตา “กี่รอบก็ได้ แต่รอบละไม่เกิน 5 รูป” ==========
 MAX_IMAGES_PER_ROUND = 5
 
-# ---------- helpers ----------
+# ---------- helpers (auth / io) ----------
 def _get_user():
     auth = request.headers.get('Authorization', '')
     if not auth.startswith('Bearer '):
@@ -76,49 +74,103 @@ def _ensure_dir(p: Path):
 def _ext_ok(filename: str) -> bool:
     return '.' in filename and filename.rsplit('.', 1)[-1].lower() in ALLOWED_EXTS
 
-# ---------- RULE-BASED RECOMMENDATIONS (NEW) ----------
+# ---------- NORMALIZE / WHITELIST สำหรับผลโมเดล ----------
+NORMAL_TOKENS = {"normal", "nomal", "healthy", "none"}
+CODE_ALIASES = {
+    "n": "N", "nitrogen": "N",
+    "p": "P", "phosphorus": "P",
+    "k": "K", "potassium": "K",
+    "mg": "Mg", "magnesium": "Mg",
+}
+
+def _load_valid_codes() -> set:
+    conn = get_db_connection()
+    if not conn:
+        return set()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT nutrient_code FROM nutrient_deficiency")
+        return {r["nutrient_code"] for r in (cur.fetchall() or [])}
+    except Exception:
+        return set()
+    finally:
+        try:
+            cur.close(); conn.close()
+        except Exception:
+            pass
+
+def _to_nutrient_code(label, valid_codes: set) -> str | None:
+    if not label:
+        return None
+    s = str(label).strip()
+    if s.lower() in NORMAL_TOKENS:
+        return None
+    if s.lower() in CODE_ALIASES:
+        s = CODE_ALIASES[s.lower()]
+    s = s.strip()
+    return s if s in valid_codes else None
+
+# ---------- RULE-BASED RECOMMENDATIONS: ใช้ fertilizer จริง ----------
 def _upsert_recommendations(cur, inspection_id: int, agg: dict):
     """
     agg: {'K': {'max_conf': 92.1, 'max_sev': 'severe'}, 'Mg': {...}, ...}
-    แนวทางแบบง่าย: สร้าง/อัปเดตคำแนะนำลง zone_inspection_recommendation
+    อัปเดต zone_inspection_recommendation โดยพยายามผูกกับ fertilizer.fertilizer_id
     """
-    RULES = {
-        'K': {
-            'fert_name': 'โพแทสเซียมคลอไรด์ (MOP)',
-            'formulation': '0-0-60',
-            'text': 'เสริมโพแทสเซียมและควบคุมความชื้น/ความเค็มของดิน',
-            'rate_per_area': '10–20 กก./ไร่',
-            'application_method': 'หว่านรอบโคน/คลุกดิน',
-        },
-        'Mg': {
-            'fert_name': 'คีเซอร์ไรท์ หรือ โดโลไมท์',
-            'formulation': 'Kieserite/Dolomite',
-            'text': 'ให้แมกนีเซียมพ่นทางใบหรือใส่ทางดิน',
-            'rate_per_area': '10–25 กก./ไร่',
-            'application_method': 'หว่าน + รดน้ำ/พ่นใบ',
-        },
-        'N': {
-            'fert_name': 'ยูเรีย',
-            'formulation': '46-0-0',
-            'text': 'เสริมไนโตรเจน เพิ่มอินทรียวัตถุและจัดการน้ำให้สม่ำเสมอ',
-            'rate_per_area': '5–10 กก./ไร่',
-            'application_method': 'แบ่งใส่หลายครั้ง',
-        },
-        'P': {
-            'fert_name': 'ซุปเปอร์ฟอสเฟต',
-            'formulation': '0-46-0',
-            'text': 'เสริมฟอสฟอรัส ช่วยระบบรากและการแตกยอด',
-            'rate_per_area': '5–10 กก./ไร่',
-            'application_method': 'คลุกดิน/รองก้นหลุม',
-        },
+    cur.execute("SELECT fertilizer_id, fert_name, formulation, description FROM fertilizer")
+    ferts = cur.fetchall() or []
+
+    def _norm(s):
+        return (s or '').strip().lower()
+
+    def _match_fertilizer_id(code: str):
+        code = (code or '').strip()
+        if not code:
+            return None
+        for r in ferts:
+            r_form = _norm(r.get("formulation"))
+            r_name = _norm(r.get("fert_name"))
+
+            if code == "N":
+                if r_form == "46-0-0": return r["fertilizer_id"]
+                if "urea" in r_name or "ยูเรีย" in r_name: return r["fertilizer_id"]
+            elif code == "P":
+                if r_form == "18-46-0": return r["fertilizer_id"]  # DAP
+                if "dap" in r_name: return r["fertilizer_id"]
+                if "ฟอสเฟต" in r_name or "ฟอสฟอรัส" in r_name: return r["fertilizer_id"]
+            elif code == "K":
+                if r_form == "0-0-60": return r["fertilizer_id"]  # MOP
+                if "mop" in r_name or "โพแทสเซียมคลอไรด์" in r_name: return r["fertilizer_id"]
+            elif code == "Mg":
+                if "โดโลไม" in r_name or "dolomite" in r_name: return r["fertilizer_id"]
+                if "แมกนีเซียม" in r_name or "magnesium" in r_name: return r["fertilizer_id"]
+                if "kieserite" in r_name or "คีเซอร์" in r_name: return r["fertilizer_id"]
+        return None
+
+    FALLBACK_TEXT = {
+        'K': 'เสริมโพแทสเซียมและควบคุมความชื้น/ความเค็มของดิน',
+        'Mg': 'ให้แมกนีเซียมพ่นทางใบหรือใส่ทางดิน',
+        'N': 'เสริมไนโตรเจน เพิ่มอินทรียวัตถุและจัดการน้ำให้สม่ำเสมอ',
+        'P': 'เสริมฟอสฟอรัส ช่วยระบบรากและการแตกยอด',
     }
+    RATE = { 'K': '10–20 กก./ไร่', 'Mg': '10–25 กก./ไร่', 'N': '5–10 กก./ไร่', 'P': '5–10 กก./ไร่' }
+    METHOD = { 'K': 'หว่านรอบโคน/คลุกดิน', 'Mg': 'หว่าน + รดน้ำ/พ่นใบ', 'N': 'แบ่งใส่หลายครั้ง', 'P': 'คลุกดิน/รองก้นหลุม' }
 
     for code, stat in agg.items():
-        rule = RULES.get(code)
-        if not rule:
-            continue
+        fert_id = _match_fertilizer_id(code)
 
-        # ตรวจ rec เดิมของ inspection + nutrient_code เพื่อเลี่ยงซ้ำ
+        rec_text = FALLBACK_TEXT.get(code, '')
+        rate = RATE.get(code)
+        method = METHOD.get(code)
+
+        if fert_id is not None:
+            try:
+                row = next(r for r in ferts if r["fertilizer_id"] == fert_id)
+                desc = (row.get("description") or "").strip()
+                if desc:
+                    rec_text = desc
+            except StopIteration:
+                pass
+
         cur.execute("""
             SELECT recommendation_id
             FROM zone_inspection_recommendation
@@ -126,26 +178,26 @@ def _upsert_recommendations(cur, inspection_id: int, agg: dict):
             ORDER BY recommendation_id DESC
             LIMIT 1
         """, (inspection_id, code))
-        row = cur.fetchone()
+        exist = cur.fetchone()
 
-        if row:
+        if exist:
             cur.execute("""
                 UPDATE zone_inspection_recommendation
-                   SET recommendation_text=%s,
+                   SET fertilizer_id=%s,
+                       recommendation_text=%s,
                        rate_per_area=%s,
                        application_method=%s,
                        status=COALESCE(status,'suggested')
                  WHERE recommendation_id=%s
-            """, (rule['text'], rule['rate_per_area'], rule['application_method'], row['recommendation_id']))
+            """, (fert_id, rec_text, rate, method, exist['recommendation_id']))
         else:
             cur.execute("""
                 INSERT INTO zone_inspection_recommendation(
                     inspection_id, fertilizer_id, nutrient_code,
                     recommendation_text, rate_per_area, application_method,
                     status, created_at
-                ) VALUES (%s, NULL, %s, %s, %s, %s, %s, NOW())
-            """, (inspection_id, code, rule['text'], rule['rate_per_area'],
-                  rule['application_method'], 'suggested'))
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+            """, (inspection_id, fert_id, code, rec_text, rate, method, 'suggested'))
 
 # ---------- start round ----------
 @inspection_bp.route('/start', methods=['POST', 'OPTIONS'])
@@ -420,33 +472,56 @@ def run_analyze(inspection_id):
         # เรียกโมเดล
         results = predict_on_paths(abs_paths, conf_thres=0.25)
 
-        # map class -> nutrient_code (แก้ให้ตรงกับ labels ของโมเดล)
-        CLASS_TO_NUTRIENT = {
+        valid_codes = _load_valid_codes()
+
+        # map ชื่อคลาสจากโมเดล → โค้ดย่อ (อย่า map "nomal" → "normal")
+        CLASS_ALIASES = {
             'Magnesium':  'Mg',
             'Nitrogen':   'N',
             'Phosphorus': 'P',
             'Potassium':  'K',
-            'nomal': 'normal'
         }
+
         def severity_from_conf(conf_pct: float) -> str:
             if conf_pct >= 85: return 'severe'
             if conf_pct >= 65: return 'moderate'
             return 'mild'
 
-        agg = {}  # code -> {'max_conf': float, 'max_sev': str}
+        agg = {}          # code -> {'max_conf': float, 'max_sev': str}
+        skipped_normal = 0
+        unknown_labels = []
+
         for item in results:
             for p in (item.get('preds') or []):
-                label = str(p.get('class', '')).strip()
-                code = CLASS_TO_NUTRIENT.get(label)
-                if not code:
+                raw_label = str(p.get('class', '')).strip()
+                label_for_code = CLASS_ALIASES.get(raw_label, raw_label)
+                code = _to_nutrient_code(label_for_code, valid_codes)
+                if code is None:
+                    if raw_label.lower() in NORMAL_TOKENS:
+                        skipped_normal += 1
+                    else:
+                        unknown_labels.append(raw_label)
                     continue
                 conf_pct = float(p.get('confidence') or 0.0) * 100.0
                 sev = severity_from_conf(conf_pct)
                 if code not in agg or conf_pct > agg[code]['max_conf']:
                     agg[code] = {'max_conf': conf_pct, 'max_sev': sev}
 
-        # ล้าง finding เก่า + บันทึก finding ใหม่
+        # เคลียร์ finding เดิม
         cur.execute("DELETE FROM zone_inspection_finding WHERE inspection_id=%s", (inspection_id,))
+
+        if not agg:
+            conn.commit()
+            return jsonify({
+                'success': True,
+                'warnings': [],
+                'results': results,
+                'findings': [],
+                'skipped_normal': skipped_normal,
+                'unknown_labels': unknown_labels
+            })
+
+        # INSERT findings ใหม่
         findings = []
         for code, stat in agg.items():
             findings.append({
@@ -460,11 +535,19 @@ def run_analyze(inspection_id):
                 VALUES(%s, %s, %s, %s, %s)
             """, (inspection_id, code, stat['max_sev'], round(stat['max_conf'], 2), None))
 
-        # ===== สร้าง/อัปเดต "คำแนะนำปุ๋ย" ตามกฎ =====
+        # อัปเดตคำแนะนำผูกกับ fertilizer จริง
         _upsert_recommendations(cur, inspection_id, agg)
 
         conn.commit()
-        return jsonify({'success': True, 'warnings': [], 'results': results, 'findings': findings})
+        return jsonify({
+            'success': True,
+            'warnings': [],
+            'results': results,
+            'findings': findings,
+            'skipped_normal': skipped_normal,
+            'unknown_labels': unknown_labels
+        })
+
     except Error as e:
         conn.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -523,10 +606,10 @@ def get_recommendations(inspection_id):
         except:
             pass
 
-# ---------- recommendations: patch status ----------
+# ---------- recommendations: patch ----------
 @inspection_bp.route('/recommendations/<int:rec_id>', methods=['PATCH', 'PUT', 'OPTIONS'])
 def patch_recommendation(rec_id):
-    user, err = _authz().__iter__() if False else _authz()  # keep same behavior
+    user, err = _authz().__iter__() if False else _authz()
     if err: return err
     uid = _user_id(user)
     if uid is None:
@@ -577,148 +660,6 @@ def patch_recommendation(rec_id):
         return jsonify({'success': True})
     except Error as e:
         conn.rollback()
-        return jsonify({'success': False, 'error': str(e)}), 500
-    finally:
-        try:
-            cur.close(); conn.close()
-        except:
-            pass
-
-# ---------- history ----------
-@inspection_bp.route('/history', methods=['GET', 'OPTIONS'])
-def inspection_history():
-    user, err = _authz()
-    if err: return err
-    uid = _user_id(user)
-    if uid is None:
-        return jsonify({'success': False, 'error': 'unauthorized'}), 401
-
-    group = (request.args.get('group') or 'month').lower()
-    if group not in ('month', 'year'):
-        group = 'month'
-
-    field_id = request.args.get('field_id', type=int)
-    zone_id  = request.args.get('zone_id', type=int)
-    start_dt, end_dt = _normalize_range(request.args.get('from'), request.args.get('to'))
-    bucket_sql = "DATE_FORMAT(zi.inspected_at, '%Y-%m')" if group == 'month' else "DATE_FORMAT(zi.inspected_at, '%Y')"
-
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({'success': False, 'error': 'db_failed'}), 500
-    try:
-        cur = conn.cursor(dictionary=True)
-
-        where = ["f.user_id = %s"]; params = [uid]
-        if start_dt:
-            where.append("zi.inspected_at >= %s"); params.append(start_dt.strftime('%Y-%m-%d %H:%M:%S'))
-        if end_dt:
-            where.append("zi.inspected_at <= %s"); params.append(end_dt.strftime('%Y-%m-%d %H:%M:%S'))
-        if field_id:
-            where.append("zi.field_id = %s"); params.append(field_id)
-        if zone_id:
-            where.append("zi.zone_id = %s"); params.append(zone_id)
-        W = " AND ".join(where)
-
-        cur.execute(f"""
-            SELECT {bucket_sql} AS bucket, COUNT(*) AS inspections
-            FROM zone_inspection zi
-            JOIN field f ON zi.field_id = f.field_id
-            WHERE {W}
-            GROUP BY bucket
-            ORDER BY bucket
-        """, params)
-        buckets = cur.fetchall()
-
-        cur.execute(f"""
-            SELECT {bucket_sql} AS bucket, COUNT(*) AS findings
-            FROM zone_inspection zi
-            JOIN zone_inspection_finding zif ON zif.inspection_id = zi.inspection_id
-            JOIN field f ON zi.field_id = f.field_id
-            WHERE {W}
-            GROUP BY bucket
-            ORDER BY bucket
-        """, params)
-        fcounts = {r['bucket']: r['findings'] for r in cur.fetchall()}
-
-        cur.execute(f"""
-            SELECT zif.nutrient_code, COUNT(*) AS cnt
-            FROM zone_inspection zi
-            JOIN zone_inspection_finding zif ON zif.inspection_id = zi.inspection_id
-            JOIN field f ON zi.field_id = f.field_id
-            WHERE {W}
-            GROUP BY zif.nutrient_code
-            ORDER BY cnt DESC
-            LIMIT 5
-        """, params)
-        top = cur.fetchall()
-
-        for b in buckets:
-            b['findings'] = fcounts.get(b['bucket'], 0)
-
-        return jsonify({'success': True, 'group': group, 'buckets': buckets, 'top_nutrients': top})
-    except Error as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-    finally:
-        try:
-            cur.close(); conn.close()
-        except:
-            pass
-
-# ---------- list ----------
-@inspection_bp.route('', methods=['GET', 'OPTIONS'])
-def list_inspections():
-    user, err = _authz()
-    if err: return err
-    uid = _user_id(user)
-    if uid is None:
-        return jsonify({'success': False, 'error': 'unauthorized'}), 401
-
-    page = max(1, int(request.args.get('page', 1)))
-    size = min(100, max(1, int(request.args.get('page_size', 20))))
-    year = request.args.get('year', type=int)
-    month = request.args.get('month', type=int)
-    field_id = request.args.get('field_id', type=int)
-    zone_id = request.args.get('zone_id', type=int)
-
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({'success': False, 'error': 'db_failed'}), 500
-    try:
-        cur = conn.cursor(dictionary=True)
-
-        where = ["f.user_id = %s"]; params = [uid]
-        if year:     where.append("YEAR(zi.inspected_at) = %s"); params.append(year)
-        if month:    where.append("MONTH(zi.inspected_at) = %s"); params.append(month)
-        if field_id: where.append("zi.field_id = %s"); params.append(field_id)
-        if zone_id:  where.append("zi.zone_id = %s"); params.append(zone_id)
-        W = " AND ".join(where)
-
-        cur.execute(f"""
-            SELECT COUNT(*) AS c
-            FROM zone_inspection zi
-            JOIN field f ON zi.field_id = f.field_id
-            WHERE {W}
-        """, params)
-        total = cur.fetchone()['c']
-
-        cur.execute(f"""
-            SELECT zi.inspection_id, zi.field_id, zi.zone_id,
-                   zi.round_no, zi.inspected_at, zi.status, zi.notes,
-                   z.zone_name, f.field_name,
-                   (SELECT COUNT(*) FROM zone_inspection_image i WHERE i.inspection_id = zi.inspection_id) AS images,
-                   (SELECT COUNT(*) FROM zone_inspection_finding fi WHERE fi.inspection_id = zi.inspection_id) AS findings,
-                   (SELECT COUNT(*) FROM zone_inspection_recommendation r WHERE r.inspection_id = zi.inspection_id) AS recs
-            FROM zone_inspection zi
-            JOIN field f ON zi.field_id = f.field_id
-            JOIN zone z   ON zi.zone_id  = z.zone_id
-            WHERE {W}
-            ORDER BY zi.inspected_at DESC, zi.inspection_id DESC
-            LIMIT %s OFFSET %s
-        """, params + [size, (page - 1) * size])
-        rows = cur.fetchall()
-
-        return jsonify({'success': True, 'data': rows, 'page': page, 'page_size': size, 'total': total})
-    except Error as e:
         return jsonify({'success': False, 'error': str(e)}), 500
     finally:
         try:

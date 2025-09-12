@@ -140,9 +140,10 @@ if bp_detect is not None:
     app.register_blueprint(bp_detect, url_prefix='/api/detect')
     logger.info("✅ Registered bp_detect at /api/detect")
 
+# สำหรับ reference_bp: ใช้ prefix จากตัว blueprint เอง (/api/reference) ห้ามซ้ำ url_prefix ที่นี่
 if reference_bp is not None:
-    app.register_blueprint(reference_bp, url_prefix='/api')
-    logger.info("✅ Registered reference_bp at /api")
+    app.register_blueprint(reference_bp)
+    logger.info("✅ Registered reference_bp at /api/reference")
 
 # ==================== ROUTES ====================
 @app.route('/health', methods=['GET'])
@@ -202,7 +203,13 @@ def index():
 
     has_reference = reference_bp is not None
     if has_reference:
-        endpoints.update({'nutrients': '/api/nutrients', 'fertilizers': '/api/fertilizers'})
+        endpoints.update({
+            'reference': '/api/reference',
+            'referenceHealth': '/api/reference/health',
+            'referenceNutrients': '/api/reference/nutrients',
+            'referenceFertilizers': '/api/reference/fertilizers',
+            'referenceAll': '/api/reference/all',
+        })
 
     token_expiry_days = int(current_app.config.get('JWT_EXPIRY_DAYS', 30))
 
@@ -283,8 +290,8 @@ if __name__ == '__main__':
     logger.info(f"UPLOAD_ROOT={UPLOAD_FOLDER}")
 
     logger.info("Blueprint status:")
-    logger.info(f"  - inspection_bp: {'✅ LOADED' if inspection_bp is not None else '❌ FAILED'}")
-    logger.info(f"  - bp_detect: {'✅ LOADED' if bp_detect is not None else '⚠️ NOT LOADED'}")
-    logger.info(f"  - reference_bp: {'✅ LOADED' if reference_bp is not None else '⚠️ NOT LOADED'}")
+    logger.info(f"  - inspection_bp: {'✅ LOADED (/api/inspections)' if inspection_bp is not None else '❌ FAILED'}")
+    logger.info(f"  - bp_detect: {'✅ LOADED (/api/detect)' if bp_detect is not None else '⚠️ NOT LOADED'}")
+    logger.info(f"  - reference_bp: {'✅ LOADED (/api/reference)' if reference_bp is not None else '⚠️ NOT LOADED'}")
 
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', '5000')), debug=True, threaded=True, use_reloader=False)
