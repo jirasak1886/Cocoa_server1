@@ -75,6 +75,7 @@ def _ext_ok(filename: str) -> bool:
     return '.' in filename and filename.rsplit('.', 1)[-1].lower() in ALLOWED_EXTS
 
 # ---------- NORMALIZE / WHITELIST สำหรับผลโมเดล ----------
+# เจอ "nomal" หรือ "normal" หรือ "healthy" ให้ถือว่า "ปกติ" → ไม่ INSERT finding
 NORMAL_TOKENS = {"normal", "nomal", "healthy", "none"}
 CODE_ALIASES = {
     "n": "N", "nitrogen": "N",
@@ -104,7 +105,7 @@ def _to_nutrient_code(label, valid_codes: set) -> str | None:
         return None
     s = str(label).strip()
     if s.lower() in NORMAL_TOKENS:
-        return None
+        return None  # ปกติ → ไม่ INSERT
     if s.lower() in CODE_ALIASES:
         s = CODE_ALIASES[s.lower()]
     s = s.strip()
@@ -474,7 +475,7 @@ def run_analyze(inspection_id):
 
         valid_codes = _load_valid_codes()
 
-        # map ชื่อคลาสจากโมเดล → โค้ดย่อ (อย่า map "nomal" → "normal")
+        # map ชื่อคลาสจากโมเดล → โค้ดย่อ
         CLASS_ALIASES = {
             'Magnesium':  'Mg',
             'Nitrogen':   'N',
@@ -660,6 +661,207 @@ def patch_recommendation(rec_id):
         return jsonify({'success': True})
     except Error as e:
         conn.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close(); conn.close()
+        except:
+            pass
+
+# ---------- (ทางเลือก) BACKFILL API: เติมคำแนะนำจาก findings เดิม ----------
+@inspection_bp.route('/<int:inspection_id>/recommendations/backfill', methods=['POST', 'OPTIONS'])
+def backfill_recommendations(inspection_id):
+    user, err = _authz()
+    if err: return err
+    uid = _user_id(user)
+    if uid is None:
+        return jsonify({'success': False, 'error': 'unauthorized'}), 401
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'success': False, 'error': 'db_failed'}), 500
+    try:
+        cur = conn.cursor(dictionary=True)
+
+        # สิทธิ์เจ้าของ
+        cur.execute("""
+            SELECT f.user_id
+            FROM zone_inspection zi
+            JOIN field f ON zi.field_id = f.field_id
+            WHERE zi.inspection_id = %s
+        """, (inspection_id,))
+        own = cur.fetchone()
+        if not own:
+            return jsonify({'success': False, 'error': 'not_found'}), 404
+        if own['user_id'] != uid:
+            return jsonify({'success': False, 'error': 'forbidden'}), 403
+
+        # รวมผลล่าสุดของแต่ละ nutrient_code
+        cur.execute("""
+            SELECT nutrient_code,
+                   MAX(confidence) AS max_conf,
+                   SUBSTRING_INDEX(
+                       GROUP_CONCAT(severity ORDER BY confidence DESC SEPARATOR ','), ',', 1
+                   ) AS max_sev
+            FROM zone_inspection_finding
+            WHERE inspection_id = %s
+            GROUP BY nutrient_code
+        """, (inspection_id,))
+        agg_rows = cur.fetchall()
+        agg = {r['nutrient_code']: {'max_conf': float(r['max_conf'] or 0.0),
+                                    'max_sev': r['max_sev'] or 'moderate'} for r in agg_rows}
+
+        _upsert_recommendations(cur, inspection_id, agg)
+
+        conn.commit()
+        return jsonify({'success': True, 'updated_codes': list(agg.keys())})
+    except Error as e:
+        conn.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close(); conn.close()
+        except:
+            pass
+
+# ---------- history (คืนค่าเชิงสถิติ) ----------
+# รองรับทั้ง /history และ /history/ เพื่อกัน redirect 308 บาง client
+@inspection_bp.route('/history', methods=['GET', 'OPTIONS'], strict_slashes=False)
+@inspection_bp.route('/history/', methods=['GET'], strict_slashes=False)
+def inspection_history():
+    user, err = _authz()
+    if err: return err
+    uid = _user_id(user)
+    if uid is None:
+        return jsonify({'success': False, 'error': 'unauthorized'}), 401
+
+    group = (request.args.get('group') or 'month').lower()
+    if group not in ('month', 'year'):
+        group = 'month'
+
+    field_id = request.args.get('field_id', type=int)
+    zone_id  = request.args.get('zone_id', type=int)
+    start_dt, end_dt = _normalize_range(request.args.get('from'), request.args.get('to'))
+    bucket_sql = "DATE_FORMAT(zi.inspected_at, '%Y-%m')" if group == 'month' else "DATE_FORMAT(zi.inspected_at, '%Y')"
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'success': False, 'error': 'db_failed'}), 500
+    try:
+        cur = conn.cursor(dictionary=True)
+
+        where = ["f.user_id = %s"]; params = [uid]
+        if start_dt:
+            where.append("zi.inspected_at >= %s"); params.append(start_dt.strftime('%Y-%m-%d %H:%M:%S'))
+        if end_dt:
+            where.append("zi.inspected_at <= %s"); params.append(end_dt.strftime('%Y-%m-%d %H:%M:%S'))
+        if field_id:
+            where.append("zi.field_id = %s"); params.append(field_id)
+        if zone_id:
+            where.append("zi.zone_id = %s"); params.append(zone_id)
+        W = " AND ".join(where)
+
+        cur.execute(f"""
+            SELECT {bucket_sql} AS bucket, COUNT(*) AS inspections
+            FROM zone_inspection zi
+            JOIN field f ON zi.field_id = f.field_id
+            WHERE {W}
+            GROUP BY bucket
+            ORDER BY bucket
+        """, params)
+        buckets = cur.fetchall()
+
+        cur.execute(f"""
+            SELECT {bucket_sql} AS bucket, COUNT(*) AS findings
+            FROM zone_inspection zi
+            JOIN zone_inspection_finding zif ON zif.inspection_id = zi.inspection_id
+            JOIN field f ON zi.field_id = f.field_id
+            WHERE {W}
+            GROUP BY bucket
+            ORDER BY bucket
+        """, params)
+        fcounts = {r['bucket']: r['findings'] for r in cur.fetchall()}
+
+        cur.execute(f"""
+            SELECT zif.nutrient_code, COUNT(*) AS cnt
+            FROM zone_inspection zi
+            JOIN zone_inspection_finding zif ON zif.inspection_id = zi.inspection_id
+            JOIN field f ON zi.field_id = f.field_id
+            WHERE {W}
+            GROUP BY zif.nutrient_code
+            ORDER BY cnt DESC
+            LIMIT 5
+        """, params)
+        top = cur.fetchall()
+
+        for b in buckets:
+            b['findings'] = fcounts.get(b['bucket'], 0)
+
+        return jsonify({'success': True, 'group': group, 'buckets': buckets, 'top_nutrients': top})
+    except Error as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cur.close(); conn.close()
+        except:
+            pass
+
+# ---------- list (หน้าแรกของ /api/inspections) ----------
+@inspection_bp.route('', methods=['GET', 'OPTIONS'], strict_slashes=False)
+@inspection_bp.route('/', methods=['GET'], strict_slashes=False)
+def list_inspections():
+    user, err = _authz()
+    if err: return err
+    uid = _user_id(user)
+    if uid is None:
+        return jsonify({'success': False, 'error': 'unauthorized'}), 401
+
+    page = max(1, int(request.args.get('page', 1)))
+    size = min(100, max(1, int(request.args.get('page_size', 20))))
+    year = request.args.get('year', type=int)
+    month = request.args.get('month', type=int)
+    field_id = request.args.get('field_id', type=int)
+    zone_id = request.args.get('zone_id', type=int)
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'success': False, 'error': 'db_failed'}), 500
+    try:
+        cur = conn.cursor(dictionary=True)
+
+        where = ["f.user_id = %s"]; params = [uid]
+        if year:     where.append("YEAR(zi.inspected_at) = %s"); params.append(year)
+        if month:    where.append("MONTH(zi.inspected_at) = %s"); params.append(month)
+        if field_id: where.append("zi.field_id = %s"); params.append(field_id)
+        if zone_id:  where.append("zi.zone_id = %s"); params.append(zone_id)
+        W = " AND ".join(where)
+
+        cur.execute(f"""
+            SELECT COUNT(*) AS c
+            FROM zone_inspection zi
+            JOIN field f ON zi.field_id = f.field_id
+            WHERE {W}
+        """, params)
+        total = cur.fetchone()['c']
+
+        cur.execute(f"""
+            SELECT zi.inspection_id, zi.field_id, zi.zone_id,
+                   zi.round_no, zi.inspected_at, zi.status, zi.notes,
+                   z.zone_name, f.field_name,
+                   (SELECT COUNT(*) FROM zone_inspection_image i WHERE i.inspection_id = zi.inspection_id) AS images,
+                   (SELECT COUNT(*) FROM zone_inspection_finding fi WHERE fi.inspection_id = zi.inspection_id) AS findings,
+                   (SELECT COUNT(*) FROM zone_inspection_recommendation r WHERE r.inspection_id = zi.inspection_id) AS recs
+            FROM zone_inspection zi
+            JOIN field f ON zi.field_id = f.field_id
+            JOIN zone z   ON zi.zone_id  = z.zone_id
+            WHERE {W}
+            ORDER BY zi.inspected_at DESC, zi.inspection_id DESC
+            LIMIT %s OFFSET %s
+        """, params + [size, (page - 1) * size])
+        rows = cur.fetchall()
+
+        return jsonify({'success': True, 'data': rows, 'page': page, 'page_size': size, 'total': total})
+    except Error as e:
         return jsonify({'success': False, 'error': str(e)}), 500
     finally:
         try:

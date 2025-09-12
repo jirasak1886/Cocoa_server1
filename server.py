@@ -2,7 +2,7 @@
 from flask import Flask, jsonify, request, current_app
 from flask_cors import CORS, cross_origin
 import os, logging, jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 
@@ -15,6 +15,7 @@ app = Flask(__name__)
 # ==================== CONFIG ====================
 app.config['JWT_SECRET_KEY'] = os.environ.get("JWT_SECRET_KEY", "dev-secret-key")
 JWT_EXPIRY_DAYS = int(os.environ.get("JWT_EXPIRY_DAYS", "30"))
+app.config['JWT_EXPIRY_DAYS'] = JWT_EXPIRY_DAYS
 # จำกัด payload ใหญ่สุด (รวม multipart)
 app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get("MAX_CONTENT_LENGTH_BYTES", str(20 * 1024 * 1024)))
 
@@ -63,6 +64,7 @@ except Exception as e:
     logger.warning(f"⚠️ routes.detect not loaded: {e}")
 
 try:
+    # NOTE: routes/reference.py ควรกำหนด url_prefix="/api/reference" ภายในไฟล์นั้นแล้ว
     from routes.reference import reference_bp as _reference_bp
     reference_bp = _reference_bp
     logger.info("✅ Loaded routes.reference successfully")
@@ -71,7 +73,7 @@ except Exception as e:
 
 # ==================== JWT HELPERS ====================
 def generate_token(user_data):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     payload = {
         'user_id': user_data['user_id'],
         'username': user_data['username'],
@@ -140,10 +142,17 @@ if bp_detect is not None:
     app.register_blueprint(bp_detect, url_prefix='/api/detect')
     logger.info("✅ Registered bp_detect at /api/detect")
 
-# สำหรับ reference_bp: ใช้ prefix จากตัว blueprint เอง (/api/reference) ห้ามซ้ำ url_prefix ที่นี่
+# สำหรับ reference_bp: ใช้ prefix ที่ประกาศใน blueprint เอง (/api/reference)
 if reference_bp is not None:
     app.register_blueprint(reference_bp)
     logger.info("✅ Registered reference_bp at /api/reference")
+
+# ==================== SHIM ALIASES (กันพลาด path เก่า/หลากหลาย client) ====================
+# ส่งต่อไปยัง handler ใน blueprint inspection เดิม
+@app.route('/api/reports/history', methods=['GET'])
+@app.route('/api/inspections/history_alias', methods=['GET'])
+def _history_alias():
+    return current_app.view_functions['inspection.inspection_history']()
 
 # ==================== ROUTES ====================
 @app.route('/health', methods=['GET'])
@@ -152,7 +161,7 @@ def health_check():
     return jsonify({
         'status': 'OK',
         'message': 'Server is running',
-        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'auth_type': 'JWT Token Only',
         'token_expiry_days': JWT_EXPIRY_DAYS,
         'upload_root': str(UPLOAD_FOLDER),
@@ -190,6 +199,7 @@ def index():
             'inspectionImages': '/api/inspections/{inspection_id}/images',
             'inspectionAnalyze': '/api/inspections/{inspection_id}/analyze',
             'inspectionHistory': '/api/inspections/history',
+            'inspectionHistoryAlias': '/api/reports/history',
             'inspectionRecommendations': '/api/inspections/{inspection_id}/recommendations',
             'recommendationPatch': '/api/inspections/recommendations/{rec_id}',
         })
@@ -231,11 +241,17 @@ def index():
 @require_auth
 def protected_test():
     user = request.current_user
+    # exp/iat จาก PyJWT มักเป็น epoch seconds
+    def _ts_to_iso(ts):
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        except Exception:
+            return str(ts)
     return jsonify({
         'success': True,
         'message': f'Hello {user["username"]}! This is a protected endpoint.',
         'user_id': user['user_id'],
-        'token_expires': datetime.fromtimestamp(user['exp']).isoformat()
+        'token_expires': _ts_to_iso(user['exp'])
     })
 
 @app.route('/routes', methods=['GET'])
@@ -259,15 +275,20 @@ def list_routes():
 @require_auth
 def get_user_info():
     user = request.current_user
+    def _ts_to_iso(ts):
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        except Exception:
+            return str(ts)
     return jsonify({
         'success': True,
         'user': {
             'user_id': user['user_id'],
             'username': user['username'],
             'name': user.get('name', ''),
-            'token_issued_at': datetime.fromtimestamp(user['iat']).isoformat(),
-            'token_expires': datetime.fromtimestamp(user['exp']).isoformat(),
-            'remaining_days': (datetime.fromtimestamp(user['exp']) - datetime.now()).days
+            'token_issued_at': _ts_to_iso(user['iat']),
+            'token_expires': _ts_to_iso(user['exp']),
+            'remaining_days': (datetime.fromtimestamp(user['exp'], tz=timezone.utc) - datetime.now(timezone.utc)).days
         }
     })
 
