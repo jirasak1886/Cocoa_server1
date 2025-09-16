@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify, current_app
 from mysql.connector import Error
 from config.database import get_db_connection, hash_password
 import jwt, bcrypt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -38,6 +38,26 @@ def _get_payload():
         return jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
     except jwt.InvalidTokenError:
         return None
+
+# ===== DB helpers =====
+def _has_users_column(column_name: str) -> bool:
+    """ตรวจว่าตาราง users มีคอลัมน์นี้หรือไม่ (ใช้กันพังเมื่อสคีมายังไม่อัปเกรด)"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("SHOW COLUMNS FROM users LIKE %s", (column_name,))
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+    finally:
+        try:
+            if conn.is_connected():
+                cur.close()
+                conn.close()
+        except Exception:
+            pass
 
 def _user_exists(username=None, user_tel=None, exclude_user_id=None):
     """เช็คซ้ำ username หรือเบอร์ (ยกเว้น user_id ของตัวเองเวลาปรับปรุงโปรไฟล์)"""
@@ -83,23 +103,22 @@ def authenticate_user(username, password):
 
         db_pass = user["user_password"]
 
-        # ✅ case 1: bcrypt
+        # ✅ bcrypt
         if db_pass.startswith("$2b$") or db_pass.startswith("$2a$"):
             if _bcrypt_check(password, db_pass):
                 return user
             return None
 
-        # ✅ case 2: sha256 legacy
+        # ✅ sha256 legacy
         if len(db_pass) == 64 and all(c in "0123456789abcdef" for c in db_pass.lower()):
             if db_pass == hash_password(password):
-                # migrate เป็น bcrypt
                 new_hash = _bcrypt_hash(password)
                 cur.execute("UPDATE users SET user_password=%s WHERE user_id=%s", (new_hash, user["user_id"]))
                 conn.commit()
                 return user
             return None
 
-        # ✅ case 3: plain legacy
+        # ✅ plain legacy
         if password == db_pass:
             new_hash = _bcrypt_hash(password)
             cur.execute("UPDATE users SET user_password=%s WHERE user_id=%s", (new_hash, user["user_id"]))
@@ -140,6 +159,7 @@ def generate_token(user_data):
         'user_id': user_data['user_id'],
         'username': user_data['username'],
         'name': user_data.get('name', ''),
+        'user_tel': user_data.get('user_tel', ''),
         'exp': now + timedelta(days=30),
         'iat': now
     }
@@ -240,30 +260,99 @@ def logout():
         return _preflight()
     return _add_cors(jsonify({'success': True, 'message': 'ออกจากระบบเรียบร้อยแล้ว'})), 200
 
+# ==================== VALIDATE (PATCHED) ====================
 @auth_bp.route('/validate', methods=['GET', 'OPTIONS'])
 def validate():
     if request.method == 'OPTIONS':
         return _preflight()
+
     auth = request.headers.get('Authorization', '')
     if not auth.startswith('Bearer '):
         return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'missing_token', 'message': 'Token is required'})), 401
+
     token = auth.split(' ')[1]
     try:
         payload = jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
-        return _add_cors(jsonify({
-            'success': True,
-            'authenticated': True,
-            'user': {
-                'user_id': payload['user_id'],
-                'username': payload['username'],
-                'name': payload.get('name', '')
-            },
-            'token_expires': datetime.fromtimestamp(payload['exp']).isoformat()
-        })), 200
     except jwt.ExpiredSignatureError:
         return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'token_expired', 'message': 'Token has expired'})), 401
     except jwt.InvalidTokenError:
         return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'invalid_token', 'message': 'Token is invalid'})), 401
+
+    # แปลงเวลาจาก payload
+    token_exp = payload.get('exp')
+    token_iat = payload.get('iat')
+    try:
+        token_exp_dt = datetime.fromtimestamp(token_exp, tz=timezone.utc) if isinstance(token_exp, (int, float)) else (token_exp if isinstance(token_exp, datetime) else None)
+        token_iat_dt = datetime.fromtimestamp(token_iat, tz=timezone.utc) if isinstance(token_iat, (int, float)) else (token_iat if isinstance(token_iat, datetime) else None)
+    except Exception:
+        token_exp_dt, token_iat_dt = None, None
+
+    # 🔒 revoke token หากมีการเปลี่ยนรหัสหลังออก token นี้
+    conn = get_db_connection()
+    if not conn:
+        return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'db_failed', 'message': 'Database connection failed'})), 500
+
+    cur = None
+    try:
+        cur = conn.cursor(dictionary=True)
+        has_pwd_col = _has_users_column('password_changed_at')
+
+        if has_pwd_col:
+            cur.execute("""
+                SELECT user_id, username, name, user_tel, password_changed_at
+                FROM users
+                WHERE user_id = %s
+                LIMIT 1
+            """, (payload['user_id'],))
+        else:
+            cur.execute("""
+                SELECT user_id, username, name, user_tel, NULL AS password_changed_at
+                FROM users
+                WHERE user_id = %s
+                LIMIT 1
+            """, (payload['user_id'],))
+
+        row = cur.fetchone()
+        if not row:
+            return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'not_found', 'message': 'User not found'})), 404
+
+        pwd_changed = row.get('password_changed_at')
+        if pwd_changed and token_iat_dt:
+            # MySQL datetime ไม่มี timezone → ผูกเป็น UTC เพื่อเทียบ
+            if pwd_changed.replace(tzinfo=timezone.utc) > token_iat_dt.replace(tzinfo=timezone.utc):
+                return _add_cors(jsonify({
+                    'success': False, 'authenticated': False,
+                    'error': 'token_revoked',
+                    'message': 'Password changed; please login again'
+                })), 401
+
+        return _add_cors(jsonify({
+            'success': True,
+            'authenticated': True,
+            'user': {
+                'user_id': row['user_id'],
+                'username': row['username'],
+                'name': row.get('name', '') or '',
+                'user_tel': row.get('user_tel') or ''
+            },
+            'token_expires': token_exp_dt.isoformat() if token_exp_dt else None
+        })), 200
+
+    except Error as e:
+        current_app.logger.error(f"/validate DB error: {e}")
+        return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'db_error', 'message': str(e)})), 500
+    except Exception as e:
+        current_app.logger.exception(f"/validate unexpected error: {e}")
+        return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'server_error', 'message': 'Internal server error'})), 500
+    finally:
+        try:
+            if cur: cur.close()
+        except Exception:
+            pass
+        try:
+            if conn and conn.is_connected(): conn.close()
+        except Exception:
+            pass
 
 # ---------- Profile ----------
 @auth_bp.route('/profile', methods=['GET', 'PUT', 'OPTIONS'])
@@ -323,7 +412,7 @@ def profile():
             cur.close()
             conn.close()
 
-# ---------- Change Password ----------
+# ---------- Change Password (PATCHED) ----------
 @auth_bp.route('/profile/password', methods=['PUT', 'OPTIONS'])
 @auth_bp.route('/change-password', methods=['PUT', 'OPTIONS'])
 def change_password():
@@ -366,7 +455,7 @@ def change_password():
 
         # verify old password (bcrypt + legacy)
         valid = False
-        if db_pass.startswith("$2b$") and _bcrypt_check(current_password, db_pass):
+        if (db_pass.startswith("$2b$") or db_pass.startswith("$2a$")) and _bcrypt_check(current_password, db_pass):
             valid = True
         elif len(db_pass) == 64 and db_pass == hash_password(current_password):
             valid = True
@@ -376,11 +465,25 @@ def change_password():
         if not valid:
             return _add_cors(jsonify({'success': False, 'error': 'wrong_password', 'message': 'รหัสผ่านเดิมไม่ถูกต้อง'})), 400
 
-        # update new password with bcrypt
+        # update new password with bcrypt + บันทึกเวลาที่เปลี่ยน (ถ้ามีคอลัมน์)
         new_hash = _bcrypt_hash(new_password)
-        cur.execute("UPDATE users SET user_password=%s WHERE user_id=%s", (new_hash, user_id))
-        conn.commit()
+        has_pwd_col = _has_users_column('password_changed_at')
 
+        if has_pwd_col:
+            cur.execute("""
+                UPDATE users
+                SET user_password=%s, password_changed_at=NOW()
+                WHERE user_id=%s
+            """, (new_hash, user_id))
+        else:
+            # ไม่มีคอลัมน์: อัปเดตรหัสผ่านได้ แต่จะไม่มีการ revoke token ตามเวลาเปลี่ยนรหัส
+            cur.execute("""
+                UPDATE users
+                SET user_password=%s
+                WHERE user_id=%s
+            """, (new_hash, user_id))
+
+        conn.commit()
         return _add_cors(jsonify({'success': True, 'message': 'เปลี่ยนรหัสผ่านสำเร็จ'})), 200
     except Error as e:
         conn.rollback()

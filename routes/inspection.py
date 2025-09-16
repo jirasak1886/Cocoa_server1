@@ -297,7 +297,13 @@ def upload_images(inspection_id):
     if uid is None:
         return jsonify({'success': False, 'error': 'unauthorized'}), 401
 
-    if not request.files:
+    # ✅ รองรับส่งหลายไฟล์ด้วยคีย์เดียวกันชื่อ "images"
+    files = request.files.getlist('images')
+    if not files:
+        # เผื่อ client เก่าที่ส่งมาเป็นหลายคีย์ไม่ซ้ำ
+        files = list(request.files.values())
+
+    if not files:
         return jsonify({'success': False, 'error': 'no_files', 'message': 'No files in multipart/form-data'}), 400
 
     conn = get_db_connection()
@@ -307,6 +313,7 @@ def upload_images(inspection_id):
     try:
         cur = conn.cursor(dictionary=True)
 
+        # สิทธิ์และสถานะรอบ
         cur.execute("""
             SELECT zi.inspection_id, zi.field_id, zi.zone_id, zi.status, f.user_id
             FROM zone_inspection zi
@@ -321,19 +328,20 @@ def upload_images(inspection_id):
         if it['status'] != STATUS_OPEN:
             return jsonify({'success': False, 'error': 'closed_round'}), 400
 
+        # โควต้า
         cur.execute("SELECT COUNT(*) AS c FROM zone_inspection_image WHERE inspection_id=%s", (inspection_id,))
         already = cur.fetchone()['c'] or 0
-
         remain = max(0, MAX_IMAGES_PER_ROUND - already)
         if remain == 0:
             return jsonify({'success': False, 'error': 'quota_full', 'exist': already, 'max': MAX_IMAGES_PER_ROUND}), 400
 
+        # โฟลเดอร์เก็บไฟล์
         saved = []
         root = _uploads_root()
         folder = root / 'inspections' / str(inspection_id)
         _ensure_dir(folder)
 
-        files = list(request.files.values())
+        # จำกัดตามโควต้า
         will_save = files[:remain]
         skipped = max(0, len(files) - len(will_save))
 
@@ -342,6 +350,7 @@ def upload_images(inspection_id):
             if not filename or not _ext_ok(filename):
                 return jsonify({'success': False, 'error': 'unsupported_media'}), 415
 
+            # ตรวจขนาด
             try:
                 f.seek(0, os.SEEK_END); size = f.tell(); f.seek(0)
             except Exception:
@@ -349,12 +358,14 @@ def upload_images(inspection_id):
             if size is not None and size > MAX_FILE_BYTES:
                 return jsonify({'success': False, 'error': 'payload_too_large'}), 413
 
+            # ตั้งชื่อและบันทึก
             ext = filename.rsplit('.', 1)[-1].lower()
             ts  = datetime.utcnow().strftime('%Y%m%d%H%M%S%f')
             safe_name = f"{inspection_id}_{ts}.{ext}"
             path = folder / safe_name
             f.save(str(path))
 
+            # บันทึก DB
             rel_path = str(path.relative_to(root)).replace('\\', '/')
             meta = {"original_name": filename, "saved_name": safe_name, "saved_at_utc": ts}
             cur.execute("""
@@ -375,6 +386,7 @@ def upload_images(inspection_id):
             cur.close(); conn.close()
         except:
             pass
+
 
 # ---------- inspection detail ----------
 @inspection_bp.route('/<int:inspection_id>', methods=['GET', 'OPTIONS'])
