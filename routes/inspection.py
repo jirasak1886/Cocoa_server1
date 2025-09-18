@@ -111,67 +111,93 @@ def _to_nutrient_code(label, valid_codes: set) -> str | None:
     s = s.strip()
     return s if s in valid_codes else None
 
-# ---------- RULE-BASED RECOMMENDATIONS: ใช้ fertilizer จริง ----------
+# ---------- RULE-BASED RECOMMENDATIONS: ใช้ fertilizer จริงเท่านั้น ----------
 def _upsert_recommendations(cur, inspection_id: int, agg: dict):
     """
     agg: {'K': {'max_conf': 92.1, 'max_sev': 'severe'}, 'Mg': {...}, ...}
-    อัปเดต zone_inspection_recommendation โดยพยายามผูกกับ fertilizer.fertilizer_id
+    - จะแนะนำเฉพาะกรณีที่หาแถวในตาราง fertilizer ได้เท่านั้น
+    - ไม่ใช้ข้อความ/อัตรา/วิธีแบบ fallback จากโค้ดอีกต่อไป
     """
+    # ตาราง fertilizer ของคุณมีคอลัมน์: fertilizer_id, fert_name, formulation, description
     cur.execute("SELECT fertilizer_id, fert_name, formulation, description FROM fertilizer")
     ferts = cur.fetchall() or []
 
-    def _norm(s):
-        return (s or '').strip().lower()
+    def _norm(s): return (s or '').strip().lower()
 
-    def _match_fertilizer_id(code: str):
-        code = (code or '').strip()
+    # สูตรมาตรฐานที่ช่วยจับคู่ (ถ้ามี)
+    CANON_FORM = {
+        'N': {'46-0-0'},
+        'P': {'18-46-0'},
+        'K': {'0-0-60'},
+        'Mg': set(),  # Mg อาจไม่มีสูตรตายตัว
+    }
+
+    def _pick_row_for_code(code: str):
+        """ลำดับการแมตช์:
+        1) fert_name = 'N'/'P'/'K'/'Mg'
+        2) formulation ตรงกับสูตรมาตรฐาน (ถ้ามี)
+        3) คีย์เวิร์ดในชื่อ (urea/DAP/MOP/dolomite/kieserite/ฯลฯ)
+        """
         if not code:
             return None
-        for r in ferts:
-            r_form = _norm(r.get("formulation"))
-            r_name = _norm(r.get("fert_name"))
+        code = code.strip()
 
-            if code == "N":
-                if r_form == "46-0-0": return r["fertilizer_id"]
-                if "urea" in r_name or "ยูเรีย" in r_name: return r["fertilizer_id"]
-            elif code == "P":
-                if r_form == "18-46-0": return r["fertilizer_id"]  # DAP
-                if "dap" in r_name: return r["fertilizer_id"]
-                if "ฟอสเฟต" in r_name or "ฟอสฟอรัส" in r_name: return r["fertilizer_id"]
-            elif code == "K":
-                if r_form == "0-0-60": return r["fertilizer_id"]  # MOP
-                if "mop" in r_name or "โพแทสเซียมคลอไรด์" in r_name: return r["fertilizer_id"]
-            elif code == "Mg":
-                if "โดโลไม" in r_name or "dolomite" in r_name: return r["fertilizer_id"]
-                if "แมกนีเซียม" in r_name or "magnesium" in r_name: return r["fertilizer_id"]
-                if "kieserite" in r_name or "คีเซอร์" in r_name: return r["fertilizer_id"]
+        # 1) ชื่อเท่ากับรหัสธาตุ
+        for r in ferts:
+            if _norm(r.get('fert_name')) == _norm(code):
+                return r
+
+        # 2) สูตรมาตรฐาน
+        target_forms = { _norm(f) for f in CANON_FORM.get(code, set()) }
+        if target_forms:
+            for r in ferts:
+                if _norm(r.get('formulation')) in target_forms:
+                    return r
+
+        # 3) คีย์เวิร์ด
+        for r in ferts:
+            name = _norm(r.get('fert_name'))
+            form = _norm(r.get('formulation'))
+            desc = _norm(r.get('description'))
+
+            if code == 'N' and ('urea' in name or 'ยูเรีย' in name or form == '46-0-0'):
+                return r
+            if code == 'P' and ('dap' in name or 'ฟอส' in name or form == '18-46-0'):
+                return r
+            if code == 'K' and ('mop' in name or 'โพแทส' in name or form == '0-0-60'):
+                return r
+            if code == 'Mg' and (
+                'mg' in name or 'แมกนีเซียม' in name or 'magnesium' in name or
+                'dolomite' in name or 'โดโลไม' in name or
+                'kieserite' in name or 'คีเซอร์' in name
+            ):
+                return r
         return None
 
-    FALLBACK_TEXT = {
-        'K': 'เสริมโพแทสเซียมและควบคุมความชื้น/ความเค็มของดิน',
-        'Mg': 'ให้แมกนีเซียมพ่นทางใบหรือใส่ทางดิน',
-        'N': 'เสริมไนโตรเจน เพิ่มอินทรียวัตถุและจัดการน้ำให้สม่ำเสมอ',
-        'P': 'เสริมฟอสฟอรัส ช่วยระบบรากและการแตกยอด',
-    }
-    RATE = { 'K': '10–20 กก./ไร่', 'Mg': '10–25 กก./ไร่', 'N': '5–10 กก./ไร่', 'P': '5–10 กก./ไร่' }
-    METHOD = { 'K': 'หว่านรอบโคน/คลุกดิน', 'Mg': 'หว่าน + รดน้ำ/พ่นใบ', 'N': 'แบ่งใส่หลายครั้ง', 'P': 'คลุกดิน/รองก้นหลุม' }
-
     for code, stat in agg.items():
-        fert_id = _match_fertilizer_id(code)
+        row = _pick_row_for_code(code)
 
-        rec_text = FALLBACK_TEXT.get(code, '')
-        rate = RATE.get(code)
-        method = METHOD.get(code)
+        # 🚫 ไม่พบใน fertilizer → ข้าม ไม่สร้าง/ไม่อัปเดต recommendation
+        if not row:
+            continue
 
-        if fert_id is not None:
-            try:
-                row = next(r for r in ferts if r["fertilizer_id"] == fert_id)
-                desc = (row.get("description") or "").strip()
-                if desc:
-                    rec_text = desc
-            except StopIteration:
-                pass
+        fert_id = row['fertilizer_id']
+        fert_name = (row.get('fert_name') or code).strip()
+        formulation = (row.get('formulation') or '').strip()
+        base_desc = (row.get('description') or '').strip()
 
+        # ✅ rec_text เอาจาก description เป็นหลัก
+        #    ถ้า description ว่าง จะขึ้นข้อความสั้น ๆ ระบุชื่อ/สูตรเท่าที่มี
+        if base_desc:
+            rec_text = base_desc
+        else:
+            rec_text = f"แนะนำปุ๋ย {fert_name}" + (f" สูตร {formulation}" if formulation else "")
+
+        # อัตรา/วิธี: ตามที่ขอ — ถ้าไม่อยู่ใน fertilizer ก็ไม่ใส่ (ให้เป็น NULL)
+        rate = None
+        method = None
+
+        # UPSERT: ใช้ inspection_id + nutrient_code (เลือกแถวล่าสุด)
         cur.execute("""
             SELECT recommendation_id
             FROM zone_inspection_recommendation
@@ -199,6 +225,7 @@ def _upsert_recommendations(cur, inspection_id: int, agg: dict):
                     status, created_at
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
             """, (inspection_id, fert_id, code, rec_text, rate, method, 'suggested'))
+
 
 # ---------- start round ----------
 @inspection_bp.route('/start', methods=['POST', 'OPTIONS'])
@@ -504,17 +531,25 @@ def run_analyze(inspection_id):
         skipped_normal = 0
         unknown_labels = []
 
+        # ✔ ตัวแปรใหม่ไว้บอกว่าพบ "อย่างอื่นที่ไม่ใช่ปกติ" หรือไม่
+        saw_any_pred = False
+        saw_any_non_normal = False
+
         for item in results:
             for p in (item.get('preds') or []):
+                saw_any_pred = True
                 raw_label = str(p.get('class', '')).strip()
                 label_for_code = CLASS_ALIASES.get(raw_label, raw_label)
                 code = _to_nutrient_code(label_for_code, valid_codes)
                 if code is None:
+                    # โมเดลบอก normal/healthy → นับไว้ แต่ไม่สร้าง finding
                     if raw_label.lower() in NORMAL_TOKENS:
                         skipped_normal += 1
                     else:
                         unknown_labels.append(raw_label)
                     continue
+                # ถ้าเข้ามาถึงตรงนี้ แปลว่า "ไม่ปกติ"
+                saw_any_non_normal = True
                 conf_pct = float(p.get('confidence') or 0.0) * 100.0
                 sev = severity_from_conf(conf_pct)
                 if code not in agg or conf_pct > agg[code]['max_conf']:
@@ -523,7 +558,11 @@ def run_analyze(inspection_id):
         # เคลียร์ finding เดิม
         cur.execute("DELETE FROM zone_inspection_finding WHERE inspection_id=%s", (inspection_id,))
 
+        # 🟢 เคส "ใบปกติทั้งหมด" (มี prediction และไม่มีอาการขาดธาตุเลย)
+        is_all_normal = (saw_any_pred and not saw_any_non_normal)
+
         if not agg:
+            # ไม่มี finding ใหม่ (เพราะปกติทั้งหมด หรือไม่มี detection)
             conn.commit()
             return jsonify({
                 'success': True,
@@ -531,10 +570,13 @@ def run_analyze(inspection_id):
                 'results': results,
                 'findings': [],
                 'skipped_normal': skipped_normal,
-                'unknown_labels': unknown_labels
+                'unknown_labels': unknown_labels,
+                # ฟิลด์ใหม่ไว้ให้ UI ใช้แสดงผลชัดเจน
+                'is_all_normal': is_all_normal,
+                'normal_message': "ผลการตรวจ: ใบปกติ ไม่พบอาการขาดธาตุ" if is_all_normal else None
             })
 
-        # INSERT findings ใหม่
+        # INSERT findings ใหม่ (มีอาการขาดธาตุ)
         findings = []
         for code, stat in agg.items():
             findings.append({
@@ -548,7 +590,7 @@ def run_analyze(inspection_id):
                 VALUES(%s, %s, %s, %s, %s)
             """, (inspection_id, code, stat['max_sev'], round(stat['max_conf'], 2), None))
 
-        # อัปเดตคำแนะนำผูกกับ fertilizer จริง
+        # อัปเดตคำแนะนำผูกกับ fertilizer จริงเท่านั้น (ตามฟังก์ชันที่แก้ไว้)
         _upsert_recommendations(cur, inspection_id, agg)
 
         conn.commit()
@@ -558,7 +600,9 @@ def run_analyze(inspection_id):
             'results': results,
             'findings': findings,
             'skipped_normal': skipped_normal,
-            'unknown_labels': unknown_labels
+            'unknown_labels': unknown_labels,
+            'is_all_normal': False,           # มี finding แล้ว ก็ไม่ใช่ปกติทั้งหมด
+            'normal_message': None
         })
 
     except Error as e:
@@ -569,6 +613,7 @@ def run_analyze(inspection_id):
             cur.close(); conn.close()
         except:
             pass
+
 
 # ---------- recommendations: list ----------
 @inspection_bp.route('/<int:inspection_id>/recommendations', methods=['GET', 'OPTIONS'])
