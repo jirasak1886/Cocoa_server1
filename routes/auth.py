@@ -1,7 +1,8 @@
+# auth.py
 from flask import Blueprint, request, jsonify, current_app
 from mysql.connector import Error
 from config.database import get_db_connection, hash_password
-import jwt, bcrypt
+import jwt, bcrypt, re
 from datetime import datetime, timedelta, timezone
 
 auth_bp = Blueprint('auth', __name__)
@@ -16,6 +17,11 @@ def _bcrypt_check(password: str, hashed: str) -> bool:
     except Exception:
         return False
 
+# ==================== VALIDATION HELPERS ====================
+_email_re = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+def _is_email(s: str) -> bool:
+    return bool(_email_re.match((s or '').strip()))
+
 # ==================== CORS HELPERS ====================
 def _add_cors(resp):
     resp.headers.add('Access-Control-Allow-Origin', '*')
@@ -29,19 +35,18 @@ def _preflight():
     resp.status_code = 204
     return _add_cors(resp)
 
-def _get_payload():
+def _extract_bearer_token():
     auth_header = request.headers.get('Authorization', '')
-    if not auth_header.startswith('Bearer '):
-        return None
-    token = auth_header.split(' ')[1]
-    try:
-        return jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
-    except jwt.InvalidTokenError:
-        return None
+    if auth_header.lower().startswith('bearer '):
+        return auth_header[7:].strip()
+    return None
+
+def _decode_token(token: str):
+    return jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
 
 # ===== DB helpers =====
 def _has_users_column(column_name: str) -> bool:
-    """ตรวจว่าตาราง users มีคอลัมน์นี้หรือไม่ (ใช้กันพังเมื่อสคีมายังไม่อัปเกรด)"""
+    """ตรวจว่าตาราง users มีคอลัมน์นี้หรือไม่ (กันพังเมื่อสคีมายังไม่อัปเกรด)"""
     conn = get_db_connection()
     if not conn:
         return False
@@ -59,8 +64,8 @@ def _has_users_column(column_name: str) -> bool:
         except Exception:
             pass
 
-def _user_exists(username=None, user_tel=None, exclude_user_id=None):
-    """เช็คซ้ำ username หรือเบอร์ (ยกเว้น user_id ของตัวเองเวลาปรับปรุงโปรไฟล์)"""
+def _user_exists(username=None, user_tel=None, user_email=None, exclude_user_id=None):
+    """เช็คซ้ำ username / เบอร์ / อีเมล (ยกเว้น user_id ของตัวเองเวลาปรับโปรไฟล์)"""
     conn = get_db_connection()
     if not conn:
         return False
@@ -68,17 +73,16 @@ def _user_exists(username=None, user_tel=None, exclude_user_id=None):
         cursor = conn.cursor()
         clauses, params = [], []
         if username:
-            clauses.append("username = %s")
-            params.append(username)
+            clauses.append("username = %s"); params.append(username)
         if user_tel:
-            clauses.append("user_tel = %s")
-            params.append(user_tel)
+            clauses.append("user_tel = %s"); params.append(user_tel)
+        if user_email:
+            clauses.append("user_email = %s"); params.append(user_email)
         if not clauses:
             return False
         sql = "SELECT user_id FROM users WHERE (" + " OR ".join(clauses) + ")"
         if exclude_user_id:
-            sql += " AND user_id <> %s"
-            params.append(exclude_user_id)
+            sql += " AND user_id <> %s"; params.append(exclude_user_id)
         cursor.execute(sql, tuple(params))
         return cursor.fetchone() is not None
     finally:
@@ -94,7 +98,7 @@ def authenticate_user(username, password):
     try:
         cur = conn.cursor(dictionary=True)
         cur.execute("""
-            SELECT user_id, username, name, user_tel, user_password
+            SELECT user_id, username, name, user_tel, user_email, user_password
             FROM users WHERE username=%s
         """, (username,))
         user = cur.fetchone()
@@ -131,22 +135,29 @@ def authenticate_user(username, password):
             cur.close()
             conn.close()
 
-def register_user(username, user_tel, password, name):
+def register_user(username, user_tel, user_email, password, name):
     conn = get_db_connection()
     if not conn:
         return None
     try:
         cur = conn.cursor()
         hashed = _bcrypt_hash(password)  # ✅ always bcrypt
-        cur.execute("""
-            INSERT INTO users (username, user_tel, user_password, name)
-            VALUES (%s,%s,%s,%s)
-        """, (username, user_tel, hashed, name))
+        if _has_users_column('user_email'):
+            cur.execute("""
+                INSERT INTO users (username, user_tel, user_email, user_password, name)
+                VALUES (%s,%s,%s,%s,%s)
+            """, (username, user_tel, user_email, hashed, name))
+        else:
+            cur.execute("""
+                INSERT INTO users (username, user_tel, user_password, name)
+                VALUES (%s,%s,%s,%s)
+            """, (username, user_tel, hashed, name))
         conn.commit()
         return cur.lastrowid
     except Error as e:
         current_app.logger.error(f"Registration error: {e}")
-        conn.rollback()
+        try: conn.rollback()
+        except Exception: pass
         return None
     finally:
         if conn.is_connected():
@@ -154,14 +165,17 @@ def register_user(username, user_tel, password, name):
             conn.close()
 
 def generate_token(user_data):
-    now = datetime.utcnow()
+    # ✅ ใช้ UTC + epoch int เท่านั้น เพื่อเลี่ยงปัญหา naive/aware
+    now = datetime.now(timezone.utc)
     payload = {
         'user_id': user_data['user_id'],
         'username': user_data['username'],
         'name': user_data.get('name', ''),
         'user_tel': user_data.get('user_tel', ''),
-        'exp': now + timedelta(days=30),
-        'iat': now
+        'user_email': user_data.get('user_email', ''),
+        'iat': int(now.timestamp()),
+        'exp': int((now + timedelta(days=30)).timestamp()),
+        # 👉 ถ้าคุณอยากกัน revoke แบบเวอร์ชัน ให้ใส่ 'pwd_v' ด้วย (ดูคอมเมนต์ด้านล่างใน /validate)
     }
     return jwt.encode(payload, current_app.config['JWT_SECRET_KEY'], algorithm='HS256')
 
@@ -190,6 +204,7 @@ def login():
                 'message': 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง'
             })), 401
 
+        # ✅ ออก token หลังจาก validate สำเร็จ (ไม่มีการอัปเดตเวลาที่ทำให้เทียบ iat/changed_at เพี้ยน)
         token = generate_token(user)
         current_app.logger.info(f"Login successful for user: {username}")
         return _add_cors(jsonify({
@@ -199,7 +214,8 @@ def login():
                 'user_id': user['user_id'],
                 'username': user['username'],
                 'name': user.get('name', ''),
-                'user_tel': user.get('user_tel')
+                'user_tel': user.get('user_tel'),
+                'user_email': user.get('user_email')
             },
             'token': token,
             'expires_in_days': 30
@@ -218,13 +234,15 @@ def register():
         return _preflight()
     try:
         data = request.get_json(silent=True) or request.form
-        username = (data.get('username') or '').strip()
-        user_tel = (data.get('user_tel') or '').strip()
-        password = (data.get('password') or '').strip()
-        confirm = (data.get('confirm_password') or '').strip()
-        name = (data.get('name') or '').strip()
+        username    = (data.get('username') or '').strip()
+        user_tel    = (data.get('user_tel') or '').strip()
+        user_email  = (data.get('user_email') or '').strip().lower()
+        password    = (data.get('password') or '').strip()
+        confirm     = (data.get('confirm_password') or '').strip()
+        name        = (data.get('name') or '').strip()
 
-        if not all([username, user_tel, password, confirm, name]):
+        # --- validate ---
+        if not all([username, user_tel, password, confirm, name, user_email]):
             return _add_cors(jsonify({
                 'success': False,
                 'error': 'missing_fields',
@@ -234,21 +252,23 @@ def register():
             return _add_cors(jsonify({'success': False, 'error': 'username_too_short', 'message': 'ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร'})), 400
         if len(user_tel) < 10:
             return _add_cors(jsonify({'success': False, 'error': 'phone_invalid', 'message': 'เบอร์โทรศัพท์ไม่ถูกต้อง'})), 400
+        if not _is_email(user_email):
+            return _add_cors(jsonify({'success': False, 'error': 'email_invalid', 'message': 'อีเมลไม่ถูกต้อง'})), 400
         if password != confirm:
             return _add_cors(jsonify({'success': False, 'error': 'password_mismatch', 'message': 'รหัสผ่านไม่ตรงกัน'})), 400
         if len(password) < 6:
             return _add_cors(jsonify({'success': False, 'error': 'password_too_short', 'message': 'รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร'})), 400
-        if _user_exists(username=username, user_tel=user_tel):
-            return _add_cors(jsonify({'success': False, 'error': 'user_exists', 'message': 'ชื่อผู้ใช้หรือเบอร์โทรศัพท์นี้มีอยู่แล้ว'})), 409
+        if _user_exists(username=username, user_tel=user_tel, user_email=user_email):
+            return _add_cors(jsonify({'success': False, 'error': 'user_exists', 'message': 'ชื่อผู้ใช้/เบอร์โทร/อีเมล นี้มีอยู่แล้ว'})), 409
 
-        new_id = register_user(username, user_tel, password, name)
+        new_id = register_user(username, user_tel, user_email, password, name)
         if not new_id:
             return _add_cors(jsonify({'success': False, 'error': 'registration_failed', 'message': 'เกิดข้อผิดพลาดในการลงทะเบียน'})), 500
 
         return _add_cors(jsonify({
             'success': True,
             'message': 'ลงทะเบียนสำเร็จ!',
-            'data': {'user_id': new_id, 'username': username, 'name': name}
+            'data': {'user_id': new_id, 'username': username, 'name': name, 'user_email': user_email}
         })), 201
     except Exception as e:
         current_app.logger.error(f"Registration error: {e}")
@@ -260,34 +280,33 @@ def logout():
         return _preflight()
     return _add_cors(jsonify({'success': True, 'message': 'ออกจากระบบเรียบร้อยแล้ว'})), 200
 
-# ==================== VALIDATE (PATCHED) ====================
+# ==================== VALIDATE (FIXED TZ + EPOCH) ====================
 @auth_bp.route('/validate', methods=['GET', 'OPTIONS'])
 def validate():
     if request.method == 'OPTIONS':
         return _preflight()
 
-    auth = request.headers.get('Authorization', '')
-    if not auth.startswith('Bearer '):
+    token = _extract_bearer_token()
+    if not token:
         return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'missing_token', 'message': 'Token is required'})), 401
 
-    token = auth.split(' ')[1]
     try:
-        payload = jwt.decode(token, current_app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
+        payload = _decode_token(token)
     except jwt.ExpiredSignatureError:
         return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'token_expired', 'message': 'Token has expired'})), 401
     except jwt.InvalidTokenError:
         return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'invalid_token', 'message': 'Token is invalid'})), 401
 
-    # แปลงเวลาจาก payload
+    # ✅ iat/exp เป็น epoch int เสมอ
     token_exp = payload.get('exp')
     token_iat = payload.get('iat')
     try:
-        token_exp_dt = datetime.fromtimestamp(token_exp, tz=timezone.utc) if isinstance(token_exp, (int, float)) else (token_exp if isinstance(token_exp, datetime) else None)
-        token_iat_dt = datetime.fromtimestamp(token_iat, tz=timezone.utc) if isinstance(token_iat, (int, float)) else (token_iat if isinstance(token_iat, datetime) else None)
+        token_exp_dt = datetime.fromtimestamp(int(token_exp), tz=timezone.utc) if token_exp else None
+        token_iat_dt = datetime.fromtimestamp(int(token_iat), tz=timezone.utc) if token_iat else None
     except Exception:
         token_exp_dt, token_iat_dt = None, None
 
-    # 🔒 revoke token หากมีการเปลี่ยนรหัสหลังออก token นี้
+    # 🔒 revoke token หากมีการเปลี่ยนรหัสหลังออก token นี้ (เทียบเป็น UTC เท่านั้น)
     conn = get_db_connection()
     if not conn:
         return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'db_failed', 'message': 'Database connection failed'})), 500
@@ -298,15 +317,17 @@ def validate():
         has_pwd_col = _has_users_column('password_changed_at')
 
         if has_pwd_col:
+            # ✅ แปลงเวลาใน SQL ให้เป็น UTC เลย
             cur.execute("""
-                SELECT user_id, username, name, user_tel, password_changed_at
+                SELECT user_id, username, name, user_tel, user_email,
+                       CONVERT_TZ(password_changed_at, @@session.time_zone, '+00:00') AS password_changed_at_utc
                 FROM users
                 WHERE user_id = %s
                 LIMIT 1
             """, (payload['user_id'],))
         else:
             cur.execute("""
-                SELECT user_id, username, name, user_tel, NULL AS password_changed_at
+                SELECT user_id, username, name, user_tel, user_email, NULL AS password_changed_at_utc
                 FROM users
                 WHERE user_id = %s
                 LIMIT 1
@@ -316,15 +337,25 @@ def validate():
         if not row:
             return _add_cors(jsonify({'success': False, 'authenticated': False, 'error': 'not_found', 'message': 'User not found'})), 404
 
-        pwd_changed = row.get('password_changed_at')
-        if pwd_changed and token_iat_dt:
-            # MySQL datetime ไม่มี timezone → ผูกเป็น UTC เพื่อเทียบ
-            if pwd_changed.replace(tzinfo=timezone.utc) > token_iat_dt.replace(tzinfo=timezone.utc):
+        # --- Password revoke check (UTC vs UTC) ---
+        pwd_changed_utc = row.get('password_changed_at_utc')  # type: datetime or None
+        if pwd_changed_utc and token_iat_dt:
+            # หมายเหตุ: ค่าที่ออกจาก MySQL โดยปกติเป็น naive -> CONVERT_TZ ให้เป็น UTC แล้ว MySQL จะส่งออกมาเป็น datetime "naive"
+            # เราจะ treat ว่าเป็น UTC เสมอ:
+            pwd_changed_dt = pwd_changed_utc.replace(tzinfo=timezone.utc)
+            if pwd_changed_dt > token_iat_dt:
                 return _add_cors(jsonify({
                     'success': False, 'authenticated': False,
                     'error': 'token_revoked',
                     'message': 'Password changed; please login again'
                 })), 401
+
+        # 👉 ทางเลือกที่แข็งแรงกว่า: ใช้ pwd_version (ดูคอมเมนต์)
+        # if 'pwd_v' in payload:
+        #     cur.execute("SELECT pwd_version FROM users WHERE user_id=%s", (payload['user_id'],))
+        #     vrow = cur.fetchone()
+        #     if vrow and int(payload['pwd_v']) != int(vrow['pwd_version'] or 0):
+        #         return _add_cors(jsonify({'success': False,'authenticated': False,'error': 'token_revoked'})), 401
 
         return _add_cors(jsonify({
             'success': True,
@@ -333,7 +364,8 @@ def validate():
                 'user_id': row['user_id'],
                 'username': row['username'],
                 'name': row.get('name', '') or '',
-                'user_tel': row.get('user_tel') or ''
+                'user_tel': row.get('user_tel') or '',
+                'user_email': row.get('user_email') or ''
             },
             'token_expires': token_exp_dt.isoformat() if token_exp_dt else None
         })), 200
@@ -360,9 +392,13 @@ def profile():
     if request.method == 'OPTIONS':
         return _preflight()
 
-    payload = _get_payload()
-    if not payload:
+    token = _extract_bearer_token()
+    if not token:
         return _add_cors(jsonify({'success': False, 'error': 'unauthorized', 'message': 'Authentication required'})), 401
+    try:
+        payload = _decode_token(token)
+    except Exception:
+        return _add_cors(jsonify({'success': False, 'error': 'invalid_token', 'message': 'Token invalid'})), 401
 
     user_id = payload['user_id']
     conn = get_db_connection()
@@ -372,7 +408,7 @@ def profile():
     try:
         cur = conn.cursor(dictionary=True)
         if request.method == 'GET':
-            cur.execute("SELECT user_id, username, name, user_tel FROM users WHERE user_id = %s", (user_id,))
+            cur.execute("SELECT user_id, username, name, user_tel, user_email FROM users WHERE user_id = %s", (user_id,))
             row = cur.fetchone()
             if not row:
                 return _add_cors(jsonify({'success': False, 'error': 'not_found', 'message': 'User not found'})), 404
@@ -380,15 +416,24 @@ def profile():
 
         # PUT: update profile
         data = request.get_json(silent=True) or {}
-        username = (data.get('username') or '').strip()
-        name = (data.get('name') or '').strip()
-        user_tel = (data.get('user_tel') or '').strip()
+        username   = (data.get('username') or '').strip()
+        name       = (data.get('name') or '').strip()
+        user_tel   = (data.get('user_tel') or '').strip()
+        user_email = (data.get('user_email') or '').strip().lower()
 
-        if not any([username, name, user_tel]):
+        if not any([username, name, user_tel, user_email]):
             return _add_cors(jsonify({'success': False, 'error': 'nothing_to_update', 'message': 'ไม่มีข้อมูลสำหรับอัปเดต'})), 400
 
-        if (username or user_tel) and _user_exists(username=username or None, user_tel=user_tel or None, exclude_user_id=user_id):
-            return _add_cors(jsonify({'success': False, 'error': 'duplicate', 'message': 'ชื่อผู้ใช้หรือเบอร์โทรซ้ำกับผู้ใช้อื่น'})), 409
+        if user_email and not _is_email(user_email):
+            return _add_cors(jsonify({'success': False, 'error': 'email_invalid', 'message': 'อีเมลไม่ถูกต้อง'})), 400
+
+        if (username or user_tel or user_email) and _user_exists(
+            username=username or None,
+            user_tel=user_tel or None,
+            user_email=user_email or None,
+            exclude_user_id=user_id
+        ):
+            return _add_cors(jsonify({'success': False, 'error': 'duplicate', 'message': 'ชื่อผู้ใช้/เบอร์โทร/อีเมล ซ้ำกับผู้ใช้อื่น'})), 409
 
         fields, params = [], []
         if username:
@@ -397,6 +442,8 @@ def profile():
             fields.append("name=%s"); params.append(name)
         if user_tel:
             fields.append("user_tel=%s"); params.append(user_tel)
+        if user_email and _has_users_column('user_email'):
+            fields.append("user_email=%s"); params.append(user_email)
         params.append(user_id)
 
         sql = "UPDATE users SET " + ", ".join(fields) + " WHERE user_id = %s"
@@ -412,20 +459,24 @@ def profile():
             cur.close()
             conn.close()
 
-# ---------- Change Password (PATCHED) ----------
+# ---------- Change Password ----------
 @auth_bp.route('/profile/password', methods=['PUT', 'OPTIONS'])
 @auth_bp.route('/change-password', methods=['PUT', 'OPTIONS'])
 def change_password():
     if request.method == 'OPTIONS':
         return _preflight()
 
-    payload = _get_payload()
-    if not payload:
+    token = _extract_bearer_token()
+    if not token:
         return _add_cors(jsonify({
             'success': False,
             'error': 'unauthorized',
             'message': 'Authentication required'
         })), 401
+    try:
+        payload = _decode_token(token)
+    except Exception:
+        return _add_cors(jsonify({'success': False, 'error': 'invalid_token', 'message': 'Token invalid'})), 401
 
     data = (request.get_json(silent=True) or request.form or {})
     current_password = (data.get('current_password') or data.get('old_password') or '').strip()
@@ -465,23 +516,25 @@ def change_password():
         if not valid:
             return _add_cors(jsonify({'success': False, 'error': 'wrong_password', 'message': 'รหัสผ่านเดิมไม่ถูกต้อง'})), 400
 
-        # update new password with bcrypt + บันทึกเวลาที่เปลี่ยน (ถ้ามีคอลัมน์)
+        # update new password with bcrypt + บันทึกเวลาที่เปลี่ยนเป็น UTC
         new_hash = _bcrypt_hash(new_password)
         has_pwd_col = _has_users_column('password_changed_at')
 
         if has_pwd_col:
             cur.execute("""
                 UPDATE users
-                SET user_password=%s, password_changed_at=NOW()
+                SET user_password=%s, password_changed_at=UTC_TIMESTAMP()
                 WHERE user_id=%s
             """, (new_hash, user_id))
         else:
-            # ไม่มีคอลัมน์: อัปเดตรหัสผ่านได้ แต่จะไม่มีการ revoke token ตามเวลาเปลี่ยนรหัส
             cur.execute("""
                 UPDATE users
                 SET user_password=%s
                 WHERE user_id=%s
             """, (new_hash, user_id))
+
+        # 👉 ถ้าใช้ pwd_version:
+        # cur.execute("UPDATE users SET user_password=%s, pwd_version=COALESCE(pwd_version,0)+1 WHERE user_id=%s", (new_hash, user_id))
 
         conn.commit()
         return _add_cors(jsonify({'success': True, 'message': 'เปลี่ยนรหัสผ่านสำเร็จ'})), 200

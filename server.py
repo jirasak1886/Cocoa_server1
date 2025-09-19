@@ -1,4 +1,3 @@
-# server.py
 from flask import Flask, jsonify, request, current_app
 from flask_cors import CORS, cross_origin
 import os, logging, jwt
@@ -9,6 +8,7 @@ from pathlib import Path
 # ===== Base routes =====
 from routes.auth import auth_bp
 from routes.field_zone import field_zone_bp
+from routes.password_reset_email import password_reset_email_bp  # ✅ NEW
 
 app = Flask(__name__)
 
@@ -131,6 +131,7 @@ def after_request(response):
 # ==================== BLUEPRINTS REGISTRATION ====================
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(field_zone_bp, url_prefix='/api')
+app.register_blueprint(password_reset_email_bp)  # ✅ NEW (ประกาศ path ภายในเป็น /api/auth/*)
 
 if inspection_bp is not None:
     app.register_blueprint(inspection_bp, url_prefix='/api/inspections')
@@ -148,11 +149,16 @@ if reference_bp is not None:
     logger.info("✅ Registered reference_bp at /api/reference")
 
 # ==================== SHIM ALIASES (กันพลาด path เก่า/หลากหลาย client) ====================
-# ส่งต่อไปยัง handler ใน blueprint inspection เดิม
-@app.route('/api/reports/history', methods=['GET'])
-@app.route('/api/inspections/history_alias', methods=['GET'])
-def _history_alias():
-    return current_app.view_functions['inspection.inspection_history']()
+# ผูก alias เฉพาะเมื่อ inspection_bp ถูกโหลด
+if inspection_bp is not None:
+    @app.route('/api/reports/history', methods=['GET'])
+    @app.route('/api/inspections/history_alias', methods=['GET'])
+    def _history_alias():
+        fn = current_app.view_functions.get('inspection.inspection_history')
+        if not fn:
+            return jsonify({'success': False, 'error': 'not_found',
+                            'message': 'Inspection routes not loaded'}), 404
+        return fn()
 
 # ==================== ROUTES ====================
 @app.route('/health', methods=['GET'])
@@ -170,6 +176,7 @@ def health_check():
             'inspection': inspection_bp is not None,
             'detect': bp_detect is not None,
             'reference': reference_bp is not None,
+            'password_reset_email': True,         # ✅ NEW
         }
     })
 
@@ -181,6 +188,10 @@ def index():
         'authLogin': '/api/auth/login',
         'authRegister': '/api/auth/register',
         'authValidate': '/api/auth/validate',
+        # ===== Password Reset (Email OTP) =====  # ✅ NEW
+        'reqPwdReset': '/api/auth/request-password-reset',
+        'verifyPwdReset': '/api/auth/verify-reset',
+        'doPwdReset': '/api/auth/reset-password',
         'health': '/health',
         'fields': '/api/fields',
         'fieldDetail': '/api/fields/{field_id}',
@@ -233,6 +244,7 @@ def index():
             'inspection': 'loaded' if has_inspection else 'not_loaded',
             'detect': 'loaded' if has_detect else 'not_loaded',
             'reference': 'loaded' if has_reference else 'not_loaded',
+            'password_reset_email': 'loaded',   # ✅ NEW
         },
         'notes': 'Model loading & checking are handled in /api/detect/* routes.'
     })
@@ -241,7 +253,6 @@ def index():
 @require_auth
 def protected_test():
     user = request.current_user
-    # exp/iat จาก PyJWT มักเป็น epoch seconds
     def _ts_to_iso(ts):
         try:
             return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
@@ -314,5 +325,6 @@ if __name__ == '__main__':
     logger.info(f"  - inspection_bp: {'✅ LOADED (/api/inspections)' if inspection_bp is not None else '❌ FAILED'}")
     logger.info(f"  - bp_detect: {'✅ LOADED (/api/detect)' if bp_detect is not None else '⚠️ NOT LOADED'}")
     logger.info(f"  - reference_bp: {'✅ LOADED (/api/reference)' if reference_bp is not None else '⚠️ NOT LOADED'}")
+    logger.info(f"  - password_reset_email: ✅ LOADED")
 
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', '5000')), debug=True, threaded=True, use_reloader=False)
