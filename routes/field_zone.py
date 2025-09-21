@@ -198,37 +198,48 @@ def get_field_details(field_id):
 
 @field_zone_bp.route('/fields/<int:field_id>', methods=['PUT'])
 def update_field(field_id):
+    """
+    อนุญาต Partial Update:
+    - ถ้าไม่ส่ง field_name / size_square_meter มา จะใช้ค่าปัจจุบัน
+    - แทนที่ vertices ก็ต่อเมื่อ key 'vertices' ถูกส่งมา
+    """
     user, error_response, status_code = require_auth()
     if error_response: return error_response, status_code
 
     try:
         current_app.logger.debug("PUT /fields/%s RAW=%s", field_id, request.get_data(as_text=True))
         data = ensure_json()
-        field_name = (data.get('field_name') or '').strip()
-        size_square_meter = num_or_none(data.get('size_square_meter'))
-        vertices = coerce_list_vertices(data.get('vertices', None))
 
-        if not field_name or size_square_meter is None or size_square_meter <= 0:
-            return jsonify({'success': False, 'error': 'กรุณากรอกข้อมูลให้ครบถ้วน'}), 400
+        field_name_raw = data.get('field_name')
+        size_square_meter_raw = data.get('size_square_meter')
+        vertices = coerce_list_vertices(data.get('vertices', None))
 
         conn = get_db_connection()
         if not conn: return jsonify({'success': False, 'error': 'Database connection failed'}), 500
 
         try:
-            cursor = conn.cursor()
+            cursor = conn.cursor(dictionary=True)
 
-            cursor.execute("SELECT user_id FROM field WHERE field_id = %s", (field_id,))
+            cursor.execute("SELECT user_id, field_name, size_square_meter FROM field WHERE field_id = %s", (field_id,))
             row = cursor.fetchone()
             if not row:
                 return jsonify({'success': False, 'error': 'Field not found'}), 404
-            if row[0] != user['user_id']:
+            if row['user_id'] != user['user_id']:
                 return jsonify({'success': False, 'error': 'ไม่มีสิทธิ์เข้าถึงแปลงนี้'}), 403
+
+            new_field_name = (field_name_raw if field_name_raw is not None else row['field_name']).strip()
+            new_size = num_or_none(size_square_meter_raw) if size_square_meter_raw is not None else float(row['size_square_meter'])
+
+            if not new_field_name:
+                return jsonify({'success': False, 'error': 'กรุณาระบุชื่อแปลง'}), 400
+            if new_size is None or new_size <= 0:
+                return jsonify({'success': False, 'error': 'กรุณาระบุขนาดพื้นที่ให้ถูกต้อง (> 0)'}), 400
 
             cursor.execute("""
                 UPDATE field
                 SET field_name = %s, size_square_meter = %s
                 WHERE field_id = %s
-            """, (field_name, size_square_meter, field_id))
+            """, (new_field_name, new_size, field_id))
 
             if 'vertices' in data:
                 cursor.execute("DELETE FROM field_point WHERE field_id = %s", (field_id,))
@@ -685,7 +696,6 @@ def replace_marks(zone_id):
         if owner[0] != user['user_id']:
             return jsonify({'success': False, 'error': 'ไม่มีสิทธิ์เข้าถึงโซนนี้'}), 403
 
-        # ลบทิ้งทั้งหมดก่อน
         cursor.execute("DELETE FROM mark_zone WHERE zone_id = %s", (zone_id,))
 
         inserted = 0

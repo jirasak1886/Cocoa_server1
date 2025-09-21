@@ -14,6 +14,7 @@ JWT_SECRET = os.environ.get("JWT_SECRET_KEY", "dev-secret-key")
 OTP_TTL_MINUTES = int(os.environ.get("RESET_OTP_TTL_MINUTES", "10"))
 TEMP_JWT_TTL_MINUTES = int(os.environ.get("RESET_TEMP_JWT_TTL_MINUTES", "15"))
 RESET_CHANNEL = "email"
+MIN_PASSWORD_LEN = int(os.environ.get("MIN_PASSWORD_LEN", "6"))  # ✅ อย่างน้อย 6 ตัว
 
 # ====== CORS helper ======
 def _add_cors(resp):
@@ -35,7 +36,6 @@ def _no_content():
 def _issue_temp_jwt(payload: dict, minutes: int = TEMP_JWT_TTL_MINUTES) -> str:
     now = datetime.now(timezone.utc)
     exp = now + timedelta(minutes=minutes)
-    # เก็บ iat/exp เป็น epoch sec เพื่ออ่านง่ายทุกภาษา
     body = {
         **payload,
         'iat': int(now.timestamp()),
@@ -70,7 +70,6 @@ def _verify_temp_jwt(token: str):
 
 @password_reset_email_bp.route('/api/auth/request-password-reset', methods=['POST', 'OPTIONS'])
 def request_password_reset():
-    # Preflight
     if request.method == 'OPTIONS':
         return _no_content()
 
@@ -80,13 +79,11 @@ def request_password_reset():
     if not identifier:
         return _add_cors(jsonify({'ok': False, 'message': 'missing identifier'})), 400
 
-    # หา user จากอีเมล (ถ้าอยากรองรับ username ด้วย เพิ่มเงื่อนไข OR)
     sql = "SELECT user_id, user_email FROM users WHERE user_email = %s LIMIT 1"
     user = None
     try:
         conn = get_db_connection()
         if not conn:
-            # ไม่บอก attacker ว่า DB ล่ม — ตอบ ok เสมอ
             current_app.logger.error("[RESET] DB connection failed (request)")
             return _add_cors(jsonify({'ok': True}))
         cur = conn.cursor(dictionary=True)
@@ -101,13 +98,13 @@ def request_password_reset():
         except Exception:
             pass
 
-    # ป้องกัน account enumeration → ตอบ ok เสมอ
+    # ป้องกัน enumeration
     if not user:
         current_app.logger.info("[RESET] request for unknown email -> respond ok")
         return _add_cors(jsonify({'ok': True}))
 
-    # สร้าง OTP และแฮชเก็บใน DB
-    otp = gen_otp()  # เช่น 6 หลัก
+    # สร้าง OTP + เก็บแฮช
+    otp = gen_otp()  # 6 หลัก
     tok_hash = hash_token(otp)
     expires_at = datetime.utcnow() + timedelta(minutes=OTP_TTL_MINUTES)
 
@@ -170,7 +167,6 @@ def verify_reset():
         except Exception: pass
 
     if not user:
-        # ตอบผิดรวม ๆ
         return _add_cors(jsonify({'ok': False, 'message': 'invalid'})), 400
 
     tok_hash = hash_token(otp)
@@ -227,17 +223,20 @@ def reset_password():
     # --- ข้อมูล input ---
     data = request.get_json(silent=True) or request.form or {}
     new_password = (data.get('new_password') or '').strip()
-    if len(new_password) < 8:
-        return _add_cors(jsonify({'ok': False, 'message': 'weak_password'})), 400
+    if len(new_password) < MIN_PASSWORD_LEN:  # ✅ เปลี่ยนเป็น 6 (หรือจาก ENV)
+        return _add_cors(jsonify({
+            'ok': False,
+            'error': 'weak_password',
+            'message': f'รหัสผ่านต้องมีอย่างน้อย {MIN_PASSWORD_LEN} ตัวอักษร'
+        })), 400
 
     # --- hash & อัปเดต ---
     hashed = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt()).decode()
 
     try:
         conn = get_db_connection(); cur = conn.cursor()
-        # อัปเดตรหัสผ่าน
-        cur.execute("UPDATE users SET user_password=%s, password_changed_at=NOW() WHERE user_id=%s", (hashed, payload['user_id']))
-        # ทำให้โทเค็น reset ที่ยังไม่ใช้ “หมดอายุ/ปิดใช้งาน”
+        cur.execute("UPDATE users SET user_password=%s, password_changed_at=NOW() WHERE user_id=%s",
+                    (hashed, payload['user_id']))
         cur.execute(
             "UPDATE password_reset_tokens SET used_at=%s WHERE user_id=%s AND used_at IS NULL",
             (datetime.utcnow(), payload['user_id'])
