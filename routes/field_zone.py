@@ -75,6 +75,16 @@ def coerce_list_vertices(vertices):
         order += 1
     return out
 
+def recompute_mark_count(cursor, zone_id: int) -> int:
+    """
+    นับจำนวนจุด (marks) ใน mark_zone แล้วอัปเดต zone.mark_count
+    หมายเหตุ: ไม่แตะต้อง zone.num_trees
+    """
+    cursor.execute("SELECT COUNT(*) FROM mark_zone WHERE zone_id = %s", (zone_id,))
+    count = int(cursor.fetchone()[0])
+    cursor.execute("UPDATE zone SET mark_count = %s WHERE zone_id = %s", (count, zone_id))
+    return count
+
 # ==================== FIELDS ROUTES ====================
 
 @field_zone_bp.route('/fields', methods=['GET'])
@@ -313,7 +323,7 @@ def get_zones_by_field(field_id):
             return jsonify({'success': False, 'error': 'Access denied'}), 403
 
         cursor.execute("""
-            SELECT z.zone_id, z.zone_name, z.num_trees,
+            SELECT z.zone_id, z.zone_name, z.num_trees, z.mark_count,
                    (SELECT COUNT(*) FROM zone_inspection zi WHERE zi.zone_id = z.zone_id) AS inspection_count
             FROM zone z
             WHERE z.field_id = %s
@@ -350,7 +360,7 @@ def list_zones():
                 return jsonify({'success': False, 'error': 'ไม่มีสิทธิ์เข้าถึงแปลงนี้'}), 403
 
             cur.execute("""
-                SELECT z.zone_id, z.zone_name, z.num_trees, z.field_id,
+                SELECT z.zone_id, z.zone_name, z.num_trees, z.mark_count, z.field_id,
                        (SELECT COUNT(*) FROM zone_inspection zi WHERE zi.zone_id = z.zone_id) AS inspection_count
                 FROM zone z
                 WHERE z.field_id = %s
@@ -358,7 +368,7 @@ def list_zones():
             """, (field_id,))
         else:
             cur.execute("""
-                SELECT z.zone_id, z.zone_name, z.num_trees, z.field_id,
+                SELECT z.zone_id, z.zone_name, z.num_trees, z.mark_count, z.field_id,
                        (SELECT COUNT(*) FROM zone_inspection zi WHERE zi.zone_id = z.zone_id) AS inspection_count
                 FROM zone z
                 JOIN field f ON z.field_id = f.field_id
@@ -389,10 +399,8 @@ def create_zone():
         if not field_id or not zone_name:
             return jsonify({'success': False, 'error': 'กรุณากรอกข้อมูลให้ครบถ้วน'}), 400
 
-        if isinstance(marks, list) and marks:
-            num_trees = len(marks)
         if num_trees is None:
-            num_trees = 0
+            num_trees = 0  # ผู้ใช้ไม่กรอกให้เป็น 0
 
         conn = get_db_connection()
         if not conn: return jsonify({'success': False, 'error': 'Database connection failed'}), 500
@@ -406,12 +414,14 @@ def create_zone():
             if owner[0] != user['user_id']:
                 return jsonify({'success': False, 'error': 'ไม่มีสิทธิ์เข้าถึงแปลงนี้'}), 403
 
+            # บันทึกโซน (num_trees ตามที่ผู้ใช้ระบุ)
             cursor.execute("""
                 INSERT INTO zone (zone_name, num_trees, field_id)
                 VALUES (%s, %s, %s)
             """, (zone_name, int(num_trees), int(field_id)))
             zone_id = cursor.lastrowid
 
+            # แทรกจุด (marks) ถ้ามี
             inserted = 0
             if isinstance(marks, list) and marks:
                 vals = []
@@ -431,12 +441,12 @@ def create_zone():
                     """, vals)
                     inserted = len(vals)
 
-                cursor.execute("SELECT COUNT(*) FROM mark_zone WHERE zone_id = %s", (zone_id,))
-                count = cursor.fetchone()[0]
-                cursor.execute("UPDATE zone SET num_trees = %s WHERE zone_id = %s", (count, zone_id))
+            # ✅ อัปเดตเฉพาะ mark_count (ไม่แตะ num_trees)
+            mark_count = recompute_mark_count(cursor, zone_id)
 
             conn.commit()
-            return jsonify({'success': True, 'zone_id': zone_id, 'inserted_marks': inserted, 'message': 'สร้างโซนสำเร็จ'})
+            return jsonify({'success': True, 'zone_id': zone_id, 'inserted_marks': inserted,
+                            'mark_count': mark_count, 'message': 'สร้างโซนสำเร็จ'})
         except Error as e:
             conn.rollback()
             return jsonify({'success': False, 'error': str(e)}), 500
@@ -459,7 +469,7 @@ def get_zone_details(zone_id):
     try:
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
-            SELECT z.zone_id, z.zone_name, z.num_trees, z.field_id,
+            SELECT z.zone_id, z.zone_name, z.num_trees, z.mark_count, z.field_id,
                    (SELECT COUNT(*) FROM zone_inspection zi WHERE zi.zone_id = z.zone_id) AS inspection_count
             FROM zone z
             JOIN field f ON z.field_id = f.field_id
@@ -652,12 +662,11 @@ def create_mark(zone_id):
                 """, (zone_id, int(tree_no), latitude, longitude))
                 inserted = 1
 
-            cursor.execute("SELECT COUNT(*) FROM mark_zone WHERE zone_id = %s", (zone_id,))
-            count = cursor.fetchone()[0]
-            cursor.execute("UPDATE zone SET num_trees = %s WHERE zone_id = %s", (count, zone_id))
+            # ✅ อัปเดตเฉพาะ mark_count (ไม่แตะ num_trees)
+            mark_count = recompute_mark_count(cursor, zone_id)
 
             conn.commit()
-            return jsonify({'success': True, 'inserted': inserted, 'num_trees': count, 'message': 'เพิ่ม mark สำเร็จ'})
+            return jsonify({'success': True, 'inserted': inserted, 'mark_count': mark_count, 'message': 'เพิ่ม mark สำเร็จ'})
         except Error as e:
             conn.rollback()
             return jsonify({'success': False, 'error': str(e)}), 500
@@ -717,12 +726,11 @@ def replace_marks(zone_id):
                 """, vals)
                 inserted = len(vals)
 
-        cursor.execute("SELECT COUNT(*) FROM mark_zone WHERE zone_id = %s", (zone_id,))
-        count = cursor.fetchone()[0]
-        cursor.execute("UPDATE zone SET num_trees = %s WHERE zone_id = %s", (count, zone_id))
+        # ✅ อัปเดตเฉพาะ mark_count (ไม่แตะ num_trees)
+        mark_count = recompute_mark_count(cursor, zone_id)
 
         conn.commit()
-        return jsonify({'success': True, 'inserted': inserted, 'num_trees': count, 'message': 'แทนที่พิกัดสำเร็จ'})
+        return jsonify({'success': True, 'inserted': inserted, 'mark_count': mark_count, 'message': 'แทนที่พิกัดสำเร็จ'})
     except Error as e:
         conn.rollback()
         return jsonify({'success': False, 'error': str(e)}), 500
