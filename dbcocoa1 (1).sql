@@ -3,7 +3,7 @@
 -- https://www.phpmyadmin.net/
 --
 -- Host: 127.0.0.1
--- Generation Time: Sep 22, 2025 at 12:07 PM
+-- Generation Time: Oct 03, 2025 at 12:43 PM
 -- Server version: 10.4.32-MariaDB
 -- PHP Version: 8.1.25
 
@@ -18,7 +18,7 @@ SET time_zone = "+00:00";
 /*!40101 SET NAMES utf8mb4 */;
 
 --
--- Database: `dbcocoa`
+-- Database: `dbcocoa1`
 --
 
 -- --------------------------------------------------------
@@ -28,21 +28,63 @@ SET time_zone = "+00:00";
 --
 
 CREATE TABLE `fertilizer` (
-  `fertilizer_id` int(11) NOT NULL,
-  `fert_name` varchar(120) NOT NULL,
-  `formulation` varchar(80) DEFAULT NULL,
-  `description` text DEFAULT NULL
+  `id` int(11) NOT NULL,
+  `code` varchar(32) DEFAULT NULL,
+  `name` varchar(100) DEFAULT NULL,
+  `name_th` varchar(100) DEFAULT NULL,
+  `n_pct` decimal(5,2) DEFAULT 0.00,
+  `p2o5_pct` decimal(5,2) DEFAULT 0.00,
+  `k2o_pct` decimal(5,2) DEFAULT 0.00,
+  `mg_pct` decimal(5,2) DEFAULT 0.00,
+  `ca_pct` decimal(5,2) DEFAULT 0.00,
+  `s_pct` decimal(5,2) DEFAULT 0.00,
+  `source_form` enum('granule','liquid','powder') DEFAULT 'granule',
+  `description` text DEFAULT NULL,
+  `note` text DEFAULT NULL,
+  `is_active` tinyint(1) DEFAULT 1,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT NULL ON UPDATE current_timestamp()
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 --
 -- Dumping data for table `fertilizer`
 --
 
-INSERT INTO `fertilizer` (`fertilizer_id`, `fert_name`, `formulation`, `description`) VALUES
-(1, 'ืN', '46-0-0', 'เพิ่มไนโตรเจนอย่างรวดเร็ว'),
-(2, 'P', '18-46-0', 'บูสต์ฟอสฟอรัส/ราก'),
-(3, 'K', '0-0-60', 'เพิ่มโพแทสเซียม/คุณภาพผล'),
-(4, 'Mg', '-', 'ปรับ Mg และค่า pH บางส่วน');
+INSERT INTO `fertilizer` (`id`, `code`, `name`, `name_th`, `n_pct`, `p2o5_pct`, `k2o_pct`, `mg_pct`, `ca_pct`, `s_pct`, `source_form`, `description`, `note`, `is_active`, `created_at`, `updated_at`) VALUES
+(1, '15-15-15', 'Balanced', 'ปุ๋ยสมดุล', 15.00, 15.00, 15.00, 0.00, 0.00, 0.00, 'granule', 'ใช้ทั่วไป ทุกช่วงอายุ', '', 1, '2025-09-28 16:45:13', NULL),
+(2, '16-16-16', 'Balanced+', 'ปุ๋ยสมดุลเข้มข้น', 16.00, 16.00, 16.00, 0.00, 0.00, 0.00, 'granule', 'ใช้ทั่วไป ต้องการธาตุเสมอสูง', '', 1, '2025-09-28 16:45:13', NULL),
+(3, '20-20-20', 'Triple 20', 'สูตรเสมอเข้มข้น', 20.00, 20.00, 20.00, 0.00, 0.00, 0.00, 'liquid', 'นิยมในรูปปุ๋ยน้ำ/ฉีดพ่นทางใบ', '', 1, '2025-09-28 16:45:13', NULL),
+(4, '20-10-10', 'Grow Starter', 'เร่งโต', 20.00, 10.00, 10.00, 0.00, 0.00, 0.00, 'granule', 'ช่วงตั้งตัว/เร่งใบ', '', 1, '2025-09-28 16:45:13', NULL),
+(5, '25-7-7', 'Leaf Booster+', 'เร่งใบเข้มข้น+', 25.00, 7.00, 7.00, 0.00, 0.00, 0.00, 'granule', 'N สูง เร่งแตกใบ', 'ควบคุมปริมาณ', 1, '2025-09-28 16:45:13', '2025-10-02 19:38:11'),
+(6, '21-0-0', 'Ammonium Sulfate', 'แอมโมเนียซัลเฟต', 21.00, 0.00, 0.00, 0.00, 0.00, 24.00, 'granule', 'n', 'ระวังกรดจัด', 1, '2025-09-28 16:45:13', NULL),
+(7, '46-0-0', 'ยูเรีย', 'n', 46.00, 0.00, 0.00, 0.00, 0.00, 0.00, 'granule', 'ปุ๋ยไนโตรเจนสูง', 'เสี่ยงเผารากถ้าให้มาก', 1, '2025-09-28 16:45:13', '2025-09-30 17:48:31'),
+(8, '18-46-0', 'DAP', 'DAP', 18.00, 46.00, 0.00, 0.00, 0.00, 0.00, 'granule', 'ปุ๋ยฟอสฟอรัสสูง', '', 1, '2025-09-28 16:45:13', '2025-09-29 18:58:41'),
+(9, '16-20-0', 'NP Base', 'รองพื้น N-P', 16.00, 20.00, 0.00, 0.00, 0.00, 0.00, 'granule', 'ใส่รองพื้น/ก่อนออกดอก', '', 1, '2025-09-28 16:45:13', NULL),
+(10, '0-20-0', 'SP', 'ซูเปอร์ฟอสเฟต', 0.00, 20.00, 0.00, 0.00, 0.00, 12.00, 'granule', 'เพิ่ม P และ S', '', 1, '2025-09-28 16:45:13', NULL),
+(11, '0-46-0', 'TSP', 'ทริปเปิลซูเปอร์ฟอสเฟต', 0.00, 46.00, 0.00, 0.00, 0.00, 0.00, 'granule', 'P เข้มข้น', '', 1, '2025-09-28 16:45:13', NULL),
+(12, '13-13-21', 'Fruit Set', 'บำรุงผล (P+K)', 13.00, 13.00, 21.00, 0.00, 0.00, 0.00, 'granule', 'ระยะติดผล/เพิ่มคุณภาพ', '', 1, '2025-09-28 16:45:13', NULL),
+(13, '13-13-21+Mg', 'Fruit Set Mg', 'บำรุงผล + Mg', 13.00, 13.00, 21.00, 3.00, 0.00, 0.00, 'granule', 'โกโก้/ไม้ผลขาด Mg บ่อย', 'เหมาะช่วงติดผล', 1, '2025-09-28 16:45:13', NULL),
+(14, '15-5-25', 'Fruit Fill', 'บำรุงผล K สูง', 15.00, 5.00, 25.00, 0.00, 0.00, 0.00, 'granule', 'ให้ผลผลิตเต็มที่', '', 1, '2025-09-28 16:45:13', NULL),
+(15, '15-5-25+Mg', 'Fruit Fill Mg', 'บำรุงผล K สูง + Mg', 15.00, 5.00, 25.00, 3.00, 0.00, 0.00, 'granule', 'ช่วยคุณภาพเมล็ด/ผล', 'แนะนำโกโก้ผลดึง K/Mg มาก', 1, '2025-09-28 16:45:13', NULL),
+(16, '13-7-35', 'Quality K', 'คุณภาพผลเข้ม K', 13.00, 7.00, 35.00, 0.00, 0.00, 0.00, 'granule', 'เน้นความหวาน/คุณภาพผล', '', 1, '2025-09-28 16:45:13', NULL),
+(17, '8-24-24', 'PK Booster', 'PK เข้มข้น', 8.00, 24.00, 24.00, 0.00, 0.00, 0.00, 'granule', 'ช่วงติดผล-ขยายผล', '', 1, '2025-09-28 16:45:13', NULL),
+(18, '0-0-50', 'K2SO4', 'โพแทสเซียมซัลเฟต', 0.00, 0.00, 50.00, 0.00, 0.00, 18.00, 'granule', 'K + S ไม่ใส่ Cl เหมาะโกโก้', '', 1, '2025-09-28 16:45:13', NULL),
+(19, '0-0-60', 'MOP', 'โพแทสเซียมคลอไรด์', 0.00, 0.00, 60.00, 0.00, 0.00, 0.00, 'granule', 'ปุ๋ยโพแทสเซียมสูง', 'โกโก้ไวต่อ Cl ควรเลี่ยง', 1, '2025-09-28 16:45:13', '2025-09-29 18:58:41'),
+(20, 'MgSO4', 'Epsom Salt', 'แมกนีเซียมซัลเฟต', 0.00, 0.00, 0.00, 9.80, 0.00, 13.00, 'powder', 'แก้ขาด Mg ใบเหลืองระหว่างเส้นใบ', 'พ่นทางใบได้', 1, '2025-09-28 16:45:13', NULL),
+(21, 'Dolomite', 'Dolomite', 'โดโลไมต์', 0.00, 0.00, 0.00, 10.00, 20.00, 0.00, 'granule', 'ปรับดิน + เพิ่ม Ca/Mg', 'ค่อย ๆ ปรับ pH', 1, '2025-09-28 16:45:13', NULL),
+(22, 'Gypsum', 'Gypsum', 'ยิปซัม', 0.00, 0.00, 0.00, 0.00, 23.00, 18.00, 'granule', 'เพิ่ม Ca + S ปรับโครงสร้างดิน', '', 1, '2025-09-28 16:45:13', NULL),
+(23, '10-5-20(OC)', 'Organic-Compound', 'อินทรีย์เคมี 10-5-20', 10.00, 5.00, 20.00, 0.00, 0.00, 0.00, 'granule', 'ครึ่งอินทรีย์ครึ่งเคมี', 'เพิ่มอินทรียวัตถุ', 1, '2025-09-28 16:45:13', NULL),
+(24, 'Org-Base', 'Organic', 'ปุ๋ยอินทรีย์พื้นฐาน', 1.00, 1.00, 1.00, 0.00, 2.00, 0.00, 'granule', 'เน้นปรับดิน/โครงสร้าง', 'ตัวเลขเป็นค่าเฉลี่ย', 1, '2025-09-28 16:45:13', NULL),
+(36, '12-61-0', 'MAP', 'โมโนแอมโมเนียมฟอสเฟต', 12.00, 61.00, 0.00, 0.00, 0.00, 0.00, 'granule', 'P เข้มข้น ใช้รองพื้น/พ่นใบ', NULL, 1, '2025-10-02 19:38:11', NULL),
+(37, '13-0-46', 'KNO3', 'โพแทสเซียมไนเตรต', 13.00, 0.00, 46.00, 0.00, 0.00, 0.00, 'granule', 'เพิ่ม K แบบไม่มี Cl เหมาะโกโก้', NULL, 1, '2025-10-02 19:38:11', '2025-10-02 19:46:24'),
+(38, '0-52-34', 'MKP', 'โมโนโพแทสเซียมฟอสเฟต', 0.00, 52.00, 34.00, 0.00, 0.00, 0.00, 'powder', 'เสริม P+K ไม่มี Cl ใช้พ่นได้', NULL, 1, '2025-10-02 19:38:11', '2025-10-02 19:46:24'),
+(39, '0-0-52', 'SOP (powder)', 'โพแทสเซียมซัลเฟต (ผง)', 0.00, 0.00, 52.00, 0.00, 0.00, 18.00, 'powder', 'SOP เกรดผง สำหรับละลายน้ำ/พ่น', NULL, 1, '2025-10-02 19:38:11', '2025-10-02 19:46:24'),
+(40, '12-12-17+2Mg', 'Fruit Base Mg', 'สูตรเสมอเอนเอียง K + Mg', 12.00, 12.00, 17.00, 2.00, 0.00, 0.00, 'granule', 'เหมาะไม้ผล/โกโก้', NULL, 1, '2025-10-02 19:38:11', NULL),
+(41, '20-10-10+Mg', 'Grow Starter Mg', 'เร่งโต + เสริม Mg', 20.00, 10.00, 10.00, 2.00, 0.00, 0.00, 'granule', 'ช่วงตั้งตัวมีขาด Mg ร่วม', NULL, 1, '2025-10-02 19:38:11', '2025-10-02 19:46:24'),
+(42, '14-7-35+Mg', 'Quality K Mg', 'K สูงคุณภาพผล + Mg', 14.00, 7.00, 35.00, 2.00, 0.00, 0.00, 'granule', 'ระยะขยายผล', NULL, 1, '2025-10-02 19:38:11', '2025-10-02 19:46:24'),
+(43, '13-7-35+2Mg', 'Quality K 2Mg', 'K สูงมาก + Mg เข้ม', 13.00, 7.00, 35.00, 2.00, 0.00, 0.00, 'granule', 'ระยะท้าย', NULL, 1, '2025-10-02 19:38:11', '2025-10-02 19:46:24'),
+(44, 'Kieserite', 'Kieserite', 'ไคเซอไรต์ (MgSO4·H2O)', 0.00, 0.00, 0.00, 15.00, 0.00, 20.00, 'granule', 'Mg แบบเม็ด ปลดปล่อยช้า', NULL, 1, '2025-10-02 19:38:11', '2025-10-02 19:46:24'),
+(45, 'CaNO3', 'Calcium Nitrate', 'ปุ๋ยแคลเซียมไนเตรต (15.5-0-0)', 15.50, 0.00, 0.00, 0.00, 19.00, 0.00, 'granule', 'เสริม N พร้อม Ca', NULL, 1, '2025-10-02 19:38:11', '2025-10-02 19:46:24');
 
 -- --------------------------------------------------------
 
@@ -63,6 +105,7 @@ CREATE TABLE `field` (
 --
 
 INSERT INTO `field` (`field_id`, `field_name`, `size_square_meter`, `user_id`, `created_at`) VALUES
+(1, 'Test Field', NULL, 1, '2025-09-29 18:31:14'),
 (4, 'a', 1200.00, 4, '2025-09-09 10:07:32'),
 (7, 's', 1600.00, 4, '2025-09-09 16:38:51'),
 (8, 'a', 166.00, 5, '2025-09-11 02:38:53'),
@@ -70,7 +113,8 @@ INSERT INTO `field` (`field_id`, `field_name`, `size_square_meter`, `user_id`, `
 (10, 'ทดสอบนะ', 600.00, 5, '2025-09-14 08:38:12'),
 (11, 'a', 1600.00, 7, '2025-09-16 18:28:47'),
 (12, 'b', 1600.00, 7, '2025-09-21 18:00:30'),
-(13, 'แปลง0', 201.00, 9, '2025-09-22 09:00:25');
+(13, 'แปลง0', 201.00, 9, '2025-09-22 09:00:25'),
+(15, 'Demo Farm', 8000.00, 11, '2025-09-29 18:38:09');
 
 -- --------------------------------------------------------
 
@@ -238,6 +282,7 @@ CREATE TABLE `nutrient_deficiency` (
 --
 
 INSERT INTO `nutrient_deficiency` (`nutrient_code`, `nutrient_name`, `common_symptoms`, `diagnostic_notes`) VALUES
+('ALL', 'All nutrients / Balanced', NULL, NULL),
 ('K', 'Potassium deficiency', 'ขอบใบไหม้ จุดซีดกระจาย', 'ดูใบล่างชัดเจน'),
 ('Mg', 'Magnesium deficiency', 'เหลืองระหว่างเส้นใบ ใบแก่ก่อน', 'ดูแพทเทิร์นสลับเส้นใบ'),
 ('N', 'Nitrogen deficiency', 'ใบเหลืองซีดจากโคนไปปลาย', 'ดูใบแก่ก่อน'),
@@ -311,7 +356,8 @@ INSERT INTO `users` (`user_id`, `username`, `user_email`, `user_tel`, `user_pass
 (7, 'k15', '652021044@tsu.ac.th', '0235555555', '$2b$12$0IhY/6ABdZ/pwf./w33VBewjZw2r5RfmCs7K.l.MVqQpaR/J7Cmqm', 'kkkkkk', '2025-09-19 17:55:14', '2025-09-16 18:07:06', '2025-09-19 17:55:14'),
 (8, 'k16', 'jirasak1776@gmail.com', '0955555555', '$2b$12$Kynrq58rXCmsvq3/Y9oap.HIWJjIZPLqF8SATCpydQC/y/Qj42qM.', 'kkkk kkk', NULL, '2025-09-22 07:26:24', '2025-09-22 07:27:14'),
 (9, 'tai11', '652021054@tsu.ac.th', '0936451789', '$2b$12$S4.aof75IirO20lB7XqkJ.ShvOU7JI6KM4z7koFpktbub82qCT8yC', 'tai tai', '2025-09-22 16:40:39', '2025-09-22 08:55:17', '2025-09-22 09:40:39'),
-(10, 'tai1', '652021054@tsu.ac.thf', '0215467857', '$2b$12$ZUgBuXFPaQF83oatN9WhyOYCjr9qPnAiot8bhHVBGtyP.g5PTOzSy', 'tai tai1', NULL, '2025-09-22 08:57:27', '2025-09-22 08:57:27');
+(10, 'tai1', '652021054@tsu.ac.thf', '0215467857', '$2b$12$ZUgBuXFPaQF83oatN9WhyOYCjr9qPnAiot8bhHVBGtyP.g5PTOzSy', 'tai tai1', NULL, '2025-09-22 08:57:27', '2025-09-22 08:57:27'),
+(11, 'testuser', 'test@example.com', '0000000000', '123456', 'Test User', NULL, '2025-09-29 18:33:19', '2025-09-29 18:33:19');
 
 -- --------------------------------------------------------
 
@@ -345,7 +391,8 @@ INSERT INTO `zone` (`zone_id`, `zone_name`, `num_trees`, `field_id`, `created_at
 (11, 'b1', 20, 12, '2025-09-21 18:00:44', 5),
 (12, 'a3', 20, 11, '2025-09-22 08:30:31', 5),
 (13, 'โซน3', 25, 13, '2025-09-22 09:10:28', 0),
-(15, 'b2', 20, 12, '2025-09-22 10:05:54', 5);
+(15, 'b2', 20, 12, '2025-09-22 10:05:54', 5),
+(16, 'Zone A', 0, 1, '2025-09-29 18:38:22', 0);
 
 -- --------------------------------------------------------
 
@@ -365,65 +412,6 @@ CREATE TABLE `zone_inspection` (
   `notes` text DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
---
--- Dumping data for table `zone_inspection`
---
-
-INSERT INTO `zone_inspection` (`inspection_id`, `field_id`, `zone_id`, `round_no`, `inspected_at`, `inspector_user_id`, `method`, `status`, `notes`) VALUES
-(22, 4, 2, 1, '2025-09-09 23:58:47', NULL, '', 'completed', '1'),
-(23, 4, 2, 2, '2025-09-10 01:23:21', NULL, '', 'completed', '1'),
-(24, 4, 2, 3, '2025-09-10 09:12:07', NULL, 'manual', '', '2'),
-(25, 4, 2, 4, '2025-09-10 09:12:12', NULL, 'manual', '', '2'),
-(26, 4, 2, 5, '2025-09-10 09:12:12', NULL, 'manual', '', '2'),
-(27, 4, 2, 6, '2025-09-10 09:12:13', NULL, 'manual', '', '2'),
-(28, 4, 2, 7, '2025-09-10 09:12:20', NULL, 'manual', '', '12'),
-(29, 4, 2, 8, '2025-09-10 09:12:21', NULL, 'manual', '', '12'),
-(30, 4, 2, 9, '2025-09-10 09:12:21', NULL, 'manual', '', '12'),
-(31, 4, 2, 10, '2025-09-10 09:13:13', NULL, 'manual', '', '11'),
-(32, 4, 2, 11, '2025-09-10 09:13:17', NULL, 'manual', '', '11'),
-(33, 4, 2, 12, '2025-09-10 09:13:17', NULL, 'manual', '', '11'),
-(34, 4, 2, 13, '2025-09-10 09:19:07', NULL, 'manual', '', '11'),
-(35, 4, 2, 14, '2025-09-10 09:19:09', NULL, 'manual', '', '11'),
-(36, 4, 2, 15, '2025-09-10 09:19:10', NULL, 'manual', '', '11'),
-(37, 4, 2, 16, '2025-09-10 09:21:16', NULL, 'manual', '', '11'),
-(38, 4, 2, 17, '2025-09-10 09:25:03', NULL, 'manual', '', '11'),
-(39, 4, 2, 18, '2025-09-10 09:26:47', NULL, 'manual', '', '11'),
-(40, 4, 2, 19, '2025-09-10 09:26:48', NULL, 'manual', '', '11'),
-(41, 4, 2, 20, '2025-09-10 09:27:33', NULL, 'manual', '', '11'),
-(42, 4, 2, 21, '2025-09-10 09:27:34', NULL, 'manual', '', '11'),
-(43, 4, 4, 1, '2025-09-10 09:27:48', NULL, 'manual', '', '11'),
-(44, 4, 4, 2, '2025-09-10 09:27:49', NULL, 'manual', '', '11'),
-(45, 4, 4, 3, '2025-09-10 09:31:48', NULL, 'manual', '', '11'),
-(46, 4, 4, 4, '2025-09-10 09:35:23', NULL, 'manual', 'pending', '11'),
-(47, 4, 2, 22, '2025-09-10 09:44:28', NULL, 'manual', 'pending', '222'),
-(48, 4, 2, 23, '2025-09-10 09:47:35', NULL, 'manual', 'pending', '222'),
-(49, 4, 2, 24, '2025-09-10 09:47:41', NULL, 'manual', 'pending', '222'),
-(50, 4, 2, 25, '2025-09-10 09:53:37', NULL, 'manual', 'pending', '11'),
-(51, 4, 4, 5, '2025-09-10 09:56:24', NULL, 'manual', 'pending', '22'),
-(52, 4, 4, 6, '2025-09-10 09:58:53', NULL, 'manual', 'pending', '22'),
-(53, 4, 4, 7, '2025-09-10 10:01:25', NULL, 'manual', 'pending', '111'),
-(54, 4, 2, 26, '2025-09-10 10:04:29', NULL, 'manual', 'completed', '22'),
-(55, 7, 5, 1, '2025-09-10 10:06:47', NULL, 'manual', 'pending', '22'),
-(56, 4, 4, 8, '2025-09-10 10:17:24', NULL, 'manual', '', '22'),
-(57, 4, 2, 27, '2025-09-11 00:54:20', NULL, 'manual', '', 'aa'),
-(58, 4, 2, 28, '2025-09-11 01:04:39', NULL, 'manual', '', '111'),
-(59, 4, 2, 29, '2025-09-11 01:25:13', NULL, 'manual', '', '12'),
-(60, 4, 3, 1, '2025-09-11 02:18:29', NULL, 'manual', 'pending', '12'),
-(61, 4, 2, 30, '2025-09-11 03:15:16', 4, '', '', '11'),
-(62, 8, 6, 1, '2025-09-11 09:39:15', NULL, 'manual', 'completed', '1'),
-(63, 8, 6, 2, '2025-09-11 22:45:29', NULL, 'manual', 'completed', '11'),
-(64, 8, 6, 3, '2025-09-11 22:49:26', NULL, 'manual', 'completed', '11'),
-(65, 8, 6, 4, '2025-09-12 00:44:46', NULL, 'manual', 'completed', '11'),
-(66, 8, 6, 5, '2025-09-12 01:11:16', NULL, 'manual', 'completed', '11'),
-(67, 8, 6, 6, '2025-09-12 23:09:35', NULL, 'manual', 'pending', '22'),
-(68, 9, 7, 1, '2025-09-13 01:59:37', NULL, 'manual', 'pending', NULL),
-(69, 10, 8, 1, '2025-09-14 15:43:22', NULL, 'manual', 'pending', NULL),
-(70, 11, 9, 1, '2025-09-17 01:29:38', NULL, 'manual', 'completed', NULL),
-(71, 11, 9, 2, '2025-09-18 21:41:56', NULL, 'manual', 'completed', NULL),
-(72, 11, 9, 3, '2025-09-18 22:33:42', NULL, 'manual', 'pending', NULL),
-(73, 13, 13, 1, '2025-09-22 16:23:18', NULL, 'manual', 'completed', NULL),
-(74, 13, 13, 2, '2025-09-22 16:27:21', NULL, 'manual', 'pending', NULL);
-
 -- --------------------------------------------------------
 
 --
@@ -441,38 +429,6 @@ CREATE TABLE `zone_inspection_finding` (
   `notes` text DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
---
--- Dumping data for table `zone_inspection_finding`
---
-
-INSERT INTO `zone_inspection_finding` (`finding_id`, `inspection_id`, `nutrient_code`, `severity`, `confidence`, `area_percent`, `trees_affected`, `notes`) VALUES
-(3, 22, 'Mg', 'severe', 95.71, NULL, NULL, 'aggregated from 1 detection(s)/image(s)'),
-(4, 23, 'Mg', 'severe', 95.71, NULL, NULL, 'aggregated from 1 detection(s)/image(s)'),
-(5, 54, 'N', 'moderate', 85.00, NULL, NULL, 'analyze stub'),
-(6, 54, 'K', 'mild', 72.00, NULL, NULL, 'analyze stub'),
-(12, 60, 'N', 'moderate', 82.00, NULL, NULL, 'auto-generated'),
-(22, 64, 'Mg', 'severe', 95.70, NULL, NULL, NULL),
-(23, 64, 'K', 'severe', 92.51, NULL, NULL, NULL),
-(24, 64, 'N', 'moderate', 75.17, NULL, NULL, NULL),
-(25, 64, 'P', 'mild', 36.44, NULL, NULL, NULL),
-(34, 65, 'N', 'severe', 86.66, NULL, NULL, NULL),
-(35, 65, 'K', 'severe', 92.51, NULL, NULL, NULL),
-(36, 66, 'K', 'severe', 93.07, NULL, NULL, NULL),
-(42, 68, 'Mg', 'severe', 95.71, NULL, NULL, NULL),
-(43, 67, 'Mg', 'severe', 95.70, NULL, NULL, NULL),
-(44, 67, 'K', 'severe', 92.51, NULL, NULL, NULL),
-(45, 69, 'N', 'moderate', 79.96, NULL, NULL, NULL),
-(48, 70, 'Mg', 'severe', 95.70, NULL, NULL, NULL),
-(49, 70, 'K', 'severe', 92.51, NULL, NULL, NULL),
-(50, 70, 'N', 'severe', 86.66, NULL, NULL, NULL),
-(54, 71, 'N', 'moderate', 75.17, NULL, NULL, NULL),
-(58, 73, 'N', 'severe', 86.66, NULL, NULL, NULL),
-(59, 73, 'P', 'mild', 36.44, NULL, NULL, NULL),
-(60, 73, 'K', 'severe', 92.51, NULL, NULL, NULL),
-(61, 74, 'N', 'severe', 86.66, NULL, NULL, NULL),
-(62, 74, 'K', 'severe', 92.51, NULL, NULL, NULL),
-(63, 74, 'P', 'mild', 36.44, NULL, NULL, NULL);
-
 -- --------------------------------------------------------
 
 --
@@ -489,76 +445,6 @@ CREATE TABLE `zone_inspection_image` (
   `file_path` varchar(500) DEFAULT NULL,
   `created_at` datetime DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
-
---
--- Dumping data for table `zone_inspection_image`
---
-
-INSERT INTO `zone_inspection_image` (`image_id`, `inspection_id`, `image_path`, `captured_at`, `meta`, `file_name`, `file_path`, `created_at`) VALUES
-(6, 22, 'inspections/22/20250909_165854_755377_mg.png', '2025-09-09 23:58:54', '{\"original_name\": \"mg.png\", \"saved_name\": \"20250909_165854_755377_mg.png\", \"saved_at_utc\": \"20250909_165854_755377\", \"model\": \"best (1).pt\"}', '20250909_165854_755377_mg.png', 'inspections/22/20250909_165854_755377_mg.png', '2025-09-09 23:58:54'),
-(7, 23, 'inspections/23/20250909_182333_510204_mg.png', '2025-09-10 01:23:33', '{\"original_name\": \"mg.png\", \"saved_name\": \"20250909_182333_510204_mg.png\", \"saved_at_utc\": \"20250909_182333_510204\", \"model\": \"best (1).pt\"}', '20250909_182333_510204_mg.png', 'inspections/23/20250909_182333_510204_mg.png', '2025-09-10 01:23:33'),
-(8, 54, 'inspections/54/036a27b3cdb344b88cfd0e918fbc26ab.png', '2025-09-10 10:22:20', '{\"original_name\": \"mg.png\", \"saved_name\": \"036a27b3cdb344b88cfd0e918fbc26ab.png\"}', '036a27b3cdb344b88cfd0e918fbc26ab.png', 'inspections/54/036a27b3cdb344b88cfd0e918fbc26ab.png', '2025-09-10 10:22:20'),
-(9, 50, 'inspections\\50\\50_20250910184309396731.png', '2025-09-11 01:43:09', '{\"original_name\": \"mg.png\", \"saved_name\": \"50_20250910184309396731.png\", \"saved_at_utc\": \"20250910184309396731\"}', NULL, NULL, NULL),
-(10, 53, 'inspections\\53\\53_20250910190411282932.png', '2025-09-11 02:04:11', '{\"original_name\": \"mg.png\", \"saved_name\": \"53_20250910190411282932.png\", \"saved_at_utc\": \"20250910190411282932\"}', NULL, NULL, NULL),
-(11, 53, 'inspections\\53\\53_20250910190430722184.png', '2025-09-11 02:04:30', '{\"original_name\": \"p.png\", \"saved_name\": \"53_20250910190430722184.png\", \"saved_at_utc\": \"20250910190430722184\"}', NULL, NULL, NULL),
-(12, 50, 'inspections\\50\\50_20250910191115449515.png', '2025-09-11 02:11:15', '{\"original_name\": \"mg.png\", \"saved_name\": \"50_20250910191115449515.png\", \"saved_at_utc\": \"20250910191115449515\"}', NULL, NULL, NULL),
-(13, 60, 'inspections\\60\\60_20250910191836373357.png', '2025-09-11 02:18:36', '{\"original_name\": \"p.png\", \"saved_name\": \"60_20250910191836373357.png\", \"saved_at_utc\": \"20250910191836373357\"}', NULL, NULL, NULL),
-(14, 60, 'inspections\\60\\60_20250910192023398106.png', '2025-09-11 02:20:23', '{\"original_name\": \"p2.png\", \"saved_name\": \"60_20250910192023398106.png\", \"saved_at_utc\": \"20250910192023398106\"}', NULL, NULL, NULL),
-(15, 50, 'inspections\\50\\50_20250910193951602261.png', '2025-09-11 02:39:51', '{\"original_name\": \"mg.png\", \"saved_name\": \"50_20250910193951602261.png\", \"saved_at_utc\": \"20250910193951602261\"}', NULL, NULL, NULL),
-(16, 53, 'inspections\\53\\53_20250910194556292235.png', '2025-09-11 02:45:56', '{\"original_name\": \"mg.png\", \"saved_name\": \"53_20250910194556292235.png\", \"saved_at_utc\": \"20250910194556292235\"}', NULL, NULL, NULL),
-(17, 53, 'inspections\\53\\53_20250910194729628296.png', '2025-09-11 02:47:29', '{\"original_name\": \"p.png\", \"saved_name\": \"53_20250910194729628296.png\", \"saved_at_utc\": \"20250910194729628296\"}', NULL, NULL, NULL),
-(18, 53, 'inspections\\53\\53_20250910194741004056.png', '2025-09-11 02:47:41', '{\"original_name\": \"p.png\", \"saved_name\": \"53_20250910194741004056.png\", \"saved_at_utc\": \"20250910194741004056\"}', NULL, NULL, NULL),
-(19, 61, 'inspection_61\\20250911_031526_095990.png', '2025-09-11 03:15:26', NULL, NULL, NULL, NULL),
-(20, 50, 'inspections\\50\\50_20250910201712513209.png', '2025-09-11 03:17:12', '{\"original_name\": \"mg.png\", \"saved_name\": \"50_20250910201712513209.png\", \"saved_at_utc\": \"20250910201712513209\"}', NULL, NULL, NULL),
-(21, 50, 'inspections\\50\\50_20250910201727843012.png', '2025-09-11 03:17:27', '{\"original_name\": \"mg.png\", \"saved_name\": \"50_20250910201727843012.png\", \"saved_at_utc\": \"20250910201727843012\"}', NULL, NULL, NULL),
-(22, 62, 'inspections\\62\\62_20250911023924630673.png', '2025-09-11 09:39:24', '{\"original_name\": \"p.png\", \"saved_name\": \"62_20250911023924630673.png\", \"saved_at_utc\": \"20250911023924630673\"}', NULL, NULL, NULL),
-(23, 62, 'inspections\\62\\62_20250911024326057869.png', '2025-09-11 09:43:26', '{\"original_name\": \"p.png\", \"saved_name\": \"62_20250911024326057869.png\", \"saved_at_utc\": \"20250911024326057869\"}', NULL, NULL, NULL),
-(24, 62, 'inspections\\62\\62_20250911025222853193.png', '2025-09-11 09:52:22', '{\"original_name\": \"mg.png\", \"saved_name\": \"62_20250911025222853193.png\", \"saved_at_utc\": \"20250911025222853193\"}', NULL, NULL, NULL),
-(25, 62, 'inspections\\62\\62_20250911031557505403.png', '2025-09-11 10:15:57', '{\"original_name\": \"p.png\", \"saved_name\": \"62_20250911031557505403.png\", \"saved_at_utc\": \"20250911031557505403\"}', NULL, NULL, NULL),
-(26, 62, 'inspections\\62\\62_20250911032657089896.png', '2025-09-11 10:26:57', '{\"original_name\": \"mg.png\", \"saved_name\": \"62_20250911032657089896.png\", \"saved_at_utc\": \"20250911032657089896\"}', NULL, NULL, NULL),
-(27, 63, 'inspections\\63\\63_20250911154539190264.png', '2025-09-11 22:45:39', '{\"original_name\": \"mg.png\", \"saved_name\": \"63_20250911154539190264.png\", \"saved_at_utc\": \"20250911154539190264\"}', NULL, NULL, NULL),
-(28, 63, 'inspections\\63\\63_20250911154817724934.png', '2025-09-11 22:48:17', '{\"original_name\": \"mg.png\", \"saved_name\": \"63_20250911154817724934.png\", \"saved_at_utc\": \"20250911154817724934\"}', NULL, NULL, NULL),
-(29, 64, 'inspections\\64\\64_20250911154933700167.png', '2025-09-11 22:49:33', '{\"original_name\": \"mg.png\", \"saved_name\": \"64_20250911154933700167.png\", \"saved_at_utc\": \"20250911154933700167\"}', NULL, NULL, NULL),
-(30, 64, 'inspections/64/64_20250911174113597444.png', '2025-09-12 00:41:13', '{\"original_name\": \"mg.png\", \"saved_name\": \"64_20250911174113597444.png\", \"saved_at_utc\": \"20250911174113597444\"}', NULL, NULL, NULL),
-(31, 64, 'inspections/64/64_20250911174149603490.png', '2025-09-12 00:41:49', '{\"original_name\": \"p.png\", \"saved_name\": \"64_20250911174149603490.png\", \"saved_at_utc\": \"20250911174149603490\"}', NULL, NULL, NULL),
-(32, 64, 'inspections/64/64_20250911174226887764.png', '2025-09-12 00:42:26', '{\"original_name\": \"p2.png\", \"saved_name\": \"64_20250911174226887764.png\", \"saved_at_utc\": \"20250911174226887764\"}', NULL, NULL, NULL),
-(33, 64, 'inspections/64/64_20250911174258523534.jpg', '2025-09-12 00:42:58', '{\"original_name\": \"26040.jpg\", \"saved_name\": \"64_20250911174258523534.jpg\", \"saved_at_utc\": \"20250911174258523534\"}', NULL, NULL, NULL),
-(34, 65, 'inspections/65/65_20250911174518350210.png', '2025-09-12 00:45:18', '{\"original_name\": \"10.png\", \"saved_name\": \"65_20250911174518350210.png\", \"saved_at_utc\": \"20250911174518350210\"}', NULL, NULL, NULL),
-(35, 65, 'inspections/65/65_20250911174543405448.jpg', '2025-09-12 00:45:43', '{\"original_name\": \"26040.jpg\", \"saved_name\": \"65_20250911174543405448.jpg\", \"saved_at_utc\": \"20250911174543405448\"}', NULL, NULL, NULL),
-(36, 65, 'inspections/65/65_20250911174558329034.png', '2025-09-12 00:45:58', '{\"original_name\": \"k3.png\", \"saved_name\": \"65_20250911174558329034.png\", \"saved_at_utc\": \"20250911174558329034\"}', NULL, NULL, NULL),
-(37, 65, 'inspections/65/65_20250911174613648717.jpg', '2025-09-12 00:46:13', '{\"original_name\": \"26040.jpg\", \"saved_name\": \"65_20250911174613648717.jpg\", \"saved_at_utc\": \"20250911174613648717\"}', NULL, NULL, NULL),
-(38, 65, 'inspections/65/65_20250911174642286201.jpg', '2025-09-12 00:46:42', '{\"original_name\": \"26017.jpg\", \"saved_name\": \"65_20250911174642286201.jpg\", \"saved_at_utc\": \"20250911174642286201\"}', NULL, NULL, NULL),
-(39, 66, 'inspections/66/66_20250911181123785697.jpg', '2025-09-12 01:11:23', '{\"original_name\": \"25998.jpg\", \"saved_name\": \"66_20250911181123785697.jpg\", \"saved_at_utc\": \"20250911181123785697\"}', NULL, NULL, NULL),
-(40, 66, 'inspections/66/66_20250911181147261346.jpg', '2025-09-12 01:11:47', '{\"original_name\": \"25274_0.jpg\", \"saved_name\": \"66_20250911181147261346.jpg\", \"saved_at_utc\": \"20250911181147261346\"}', NULL, NULL, NULL),
-(41, 66, 'inspections/66/66_20250911184246239857.png', '2025-09-12 01:42:46', '{\"original_name\": \"mg.png\", \"saved_name\": \"66_20250911184246239857.png\", \"saved_at_utc\": \"20250911184246239857\"}', NULL, NULL, NULL),
-(42, 66, 'inspections/66/66_20250912153641086010.png', '2025-09-12 22:36:41', '{\"original_name\": \"mg.png\", \"saved_name\": \"66_20250912153641086010.png\", \"saved_at_utc\": \"20250912153641086010\"}', NULL, NULL, NULL),
-(43, 66, 'inspections/66/66_20250912154534012995.png', '2025-09-12 22:45:34', '{\"original_name\": \"mg.png\", \"saved_name\": \"66_20250912154534012995.png\", \"saved_at_utc\": \"20250912154534012995\"}', NULL, NULL, NULL),
-(44, 67, 'inspections/67/67_20250912160941977171.png', '2025-09-12 23:09:41', '{\"original_name\": \"mg.png\", \"saved_name\": \"67_20250912160941977171.png\", \"saved_at_utc\": \"20250912160941977171\"}', NULL, NULL, NULL),
-(45, 67, 'inspections/67/67_20250912181020839737.png', '2025-09-13 01:10:20', '{\"original_name\": \"p.png\", \"saved_name\": \"67_20250912181020839737.png\", \"saved_at_utc\": \"20250912181020839737\"}', NULL, NULL, NULL),
-(46, 68, 'inspections/68/68_20250912185945357659.png', '2025-09-13 01:59:45', '{\"original_name\": \"mg.png\", \"saved_name\": \"68_20250912185945357659.png\", \"saved_at_utc\": \"20250912185945357659\"}', NULL, NULL, NULL),
-(47, 67, 'inspections/67/67_20250914062554020813.png', '2025-09-14 13:25:54', '{\"original_name\": \"p.png\", \"saved_name\": \"67_20250914062554020813.png\", \"saved_at_utc\": \"20250914062554020813\"}', NULL, NULL, NULL),
-(48, 69, 'inspections/69/69_20250914085114382354.jpg', '2025-09-14 15:51:14', '{\"original_name\": \"JPEG_20250914_155036_8889541459276801248.jpg\", \"saved_name\": \"69_20250914085114382354.jpg\", \"saved_at_utc\": \"20250914085114382354\"}', NULL, NULL, NULL),
-(49, 69, 'inspections/69/69_20250914085207234804.jpg', '2025-09-14 15:52:07', '{\"original_name\": \"JPEG_20250914_155152_1156796202011939803.jpg\", \"saved_name\": \"69_20250914085207234804.jpg\", \"saved_at_utc\": \"20250914085207234804\"}', NULL, NULL, NULL),
-(50, 69, 'inspections/69/69_20250914085224066113.jpg', '2025-09-14 15:52:24', '{\"original_name\": \"JPEG_20250914_155220_8667599919588413213.jpg\", \"saved_name\": \"69_20250914085224066113.jpg\", \"saved_at_utc\": \"20250914085224066113\"}', NULL, NULL, NULL),
-(51, 70, 'inspections/70/70_20250916182948682519.png', '2025-09-17 01:29:48', '{\"original_name\": \"mg.png\", \"saved_name\": \"70_20250916182948682519.png\", \"saved_at_utc\": \"20250916182948682519\"}', NULL, NULL, NULL),
-(52, 70, 'inspections/70/70_20250916182948691417.png', '2025-09-17 01:29:48', '{\"original_name\": \"p.png\", \"saved_name\": \"70_20250916182948691417.png\", \"saved_at_utc\": \"20250916182948691417\"}', NULL, NULL, NULL),
-(53, 70, 'inspections/70/70_20250918143203869957.png', '2025-09-18 21:32:03', '{\"original_name\": \"10.png\", \"saved_name\": \"70_20250918143203869957.png\", \"saved_at_utc\": \"20250918143203869957\"}', NULL, NULL, NULL),
-(54, 70, 'inspections/70/70_20250918143203882975.jpg', '2025-09-18 21:32:03', '{\"original_name\": \"26040.jpg\", \"saved_name\": \"70_20250918143203882975.jpg\", \"saved_at_utc\": \"20250918143203882975\"}', NULL, NULL, NULL),
-(55, 70, 'inspections/70/70_20250918143203885122.png', '2025-09-18 21:32:03', '{\"original_name\": \"k3.png\", \"saved_name\": \"70_20250918143203885122.png\", \"saved_at_utc\": \"20250918143203885122\"}', NULL, NULL, NULL),
-(56, 71, 'inspections/71/71_20250918144203029982.jpg', '2025-09-18 21:42:03', '{\"original_name\": \"26040.jpg\", \"saved_name\": \"71_20250918144203029982.jpg\", \"saved_at_utc\": \"20250918144203029982\"}', NULL, NULL, NULL),
-(57, 71, 'inspections/71/71_20250918144231259520.jpg', '2025-09-18 21:42:31', '{\"original_name\": \"26001.jpg\", \"saved_name\": \"71_20250918144231259520.jpg\", \"saved_at_utc\": \"20250918144231259520\"}', NULL, NULL, NULL),
-(58, 71, 'inspections/71/71_20250918150248719635.jpg', '2025-09-18 22:02:48', '{\"original_name\": \"26000.jpg\", \"saved_name\": \"71_20250918150248719635.jpg\", \"saved_at_utc\": \"20250918150248719635\"}', NULL, NULL, NULL),
-(59, 71, 'inspections/71/71_20250918151802761983.jpg', '2025-09-18 22:18:02', '{\"original_name\": \"26000.jpg\", \"saved_name\": \"71_20250918151802761983.jpg\", \"saved_at_utc\": \"20250918151802761983\"}', NULL, NULL, NULL),
-(60, 73, 'inspections/73/73_20250922092454588556.jpg', '2025-09-22 16:24:54', '{\"original_name\": \"26014.jpg\", \"saved_name\": \"73_20250922092454588556.jpg\", \"saved_at_utc\": \"20250922092454588556\"}', NULL, NULL, NULL),
-(61, 73, 'inspections/73/73_20250922092454593781.png', '2025-09-22 16:24:54', '{\"original_name\": \"scaled_m6.png\", \"saved_name\": \"73_20250922092454593781.png\", \"saved_at_utc\": \"20250922092454593781\"}', NULL, NULL, NULL),
-(62, 73, 'inspections/73/73_20250922092454595251.png', '2025-09-22 16:24:54', '{\"original_name\": \"p2.png\", \"saved_name\": \"73_20250922092454595251.png\", \"saved_at_utc\": \"20250922092454595251\"}', NULL, NULL, NULL),
-(63, 73, 'inspections/73/73_20250922092454596642.png', '2025-09-22 16:24:54', '{\"original_name\": \"10.png\", \"saved_name\": \"73_20250922092454596642.png\", \"saved_at_utc\": \"20250922092454596642\"}', NULL, NULL, NULL),
-(64, 73, 'inspections/73/73_20250922092454597863.png', '2025-09-22 16:24:54', '{\"original_name\": \"k3.png\", \"saved_name\": \"73_20250922092454597863.png\", \"saved_at_utc\": \"20250922092454597863\"}', NULL, NULL, NULL),
-(65, 74, 'inspections/74/74_20250922092729092090.png', '2025-09-22 16:27:29', '{\"original_name\": \"10.png\", \"saved_name\": \"74_20250922092729092090.png\", \"saved_at_utc\": \"20250922092729092090\"}', NULL, NULL, NULL),
-(66, 74, 'inspections/74/74_20250922092729094211.jpg', '2025-09-22 16:27:29', '{\"original_name\": \"26040.jpg\", \"saved_name\": \"74_20250922092729094211.jpg\", \"saved_at_utc\": \"20250922092729094211\"}', NULL, NULL, NULL),
-(67, 74, 'inspections/74/74_20250922092729096018.png', '2025-09-22 16:27:29', '{\"original_name\": \"k3.png\", \"saved_name\": \"74_20250922092729096018.png\", \"saved_at_utc\": \"20250922092729096018\"}', NULL, NULL, NULL),
-(68, 74, 'inspections/74/74_20250922092729098473.png', '2025-09-22 16:27:29', '{\"original_name\": \"m6.png\", \"saved_name\": \"74_20250922092729098473.png\", \"saved_at_utc\": \"20250922092729098473\"}', NULL, NULL, NULL),
-(69, 74, 'inspections/74/74_20250922092729100807.png', '2025-09-22 16:27:29', '{\"original_name\": \"p2.png\", \"saved_name\": \"74_20250922092729100807.png\", \"saved_at_utc\": \"20250922092729100807\"}', NULL, NULL, NULL);
 
 --
 -- Triggers `zone_inspection_image`
@@ -616,7 +502,24 @@ INSERT INTO `zone_inspection_recommendation` (`recommendation_id`, `inspection_i
 (15, 73, 3, 'K', 'เพิ่มโพแทสเซียม/คุณภาพผล', NULL, NULL, 'suggested', NULL, '2025-09-22 09:25:20'),
 (16, 74, 1, 'N', 'เพิ่มไนโตรเจนอย่างรวดเร็ว', NULL, NULL, 'suggested', NULL, '2025-09-22 09:27:30'),
 (17, 74, 3, 'K', 'เพิ่มโพแทสเซียม/คุณภาพผล', NULL, NULL, 'suggested', NULL, '2025-09-22 09:27:30'),
-(18, 74, 2, 'P', 'บูสต์ฟอสฟอรัส/ราก', NULL, NULL, 'suggested', NULL, '2025-09-22 09:27:30');
+(18, 74, 2, 'P', 'บูสต์ฟอสฟอรัส/ราก', NULL, NULL, 'suggested', NULL, '2025-09-22 09:27:30'),
+(19, 72, 1, 'N', 'เพิ่มไนโตรเจนอย่างรวดเร็ว', NULL, NULL, 'suggested', NULL, '2025-09-23 11:02:10'),
+(20, 75, 1, 'N', 'เพิ่มไนโตรเจนอย่างรวดเร็ว', NULL, NULL, 'suggested', NULL, '2025-09-23 11:04:45'),
+(21, 76, 3, 'K', 'เพิ่มโพแทสเซียม/คุณภาพผล', NULL, NULL, 'suggested', NULL, '2025-09-23 11:06:33'),
+(22, 76, 1, 'N', 'เพิ่มไนโตรเจนอย่างรวดเร็ว', NULL, NULL, 'suggested', NULL, '2025-09-23 11:06:33'),
+(23, 77, 1, 'N', 'เพิ่มไนโตรเจนอย่างรวดเร็ว', NULL, NULL, 'suggested', NULL, '2025-09-23 11:11:04'),
+(24, 78, 1, 'N', 'เพิ่มไนโตรเจนอย่างรวดเร็ว', NULL, NULL, 'suggested', NULL, '2025-09-23 11:13:07'),
+(25, 79, 3, 'K', 'เพิ่มโพแทสเซียม/คุณภาพผล', NULL, NULL, 'suggested', NULL, '2025-09-23 11:15:21'),
+(26, 79, 2, 'P', 'บูสต์ฟอสฟอรัส/ราก', NULL, NULL, 'suggested', NULL, '2025-09-23 11:15:21'),
+(27, 80, 3, 'K', 'เพิ่มโพแทสเซียม/คุณภาพผล', NULL, NULL, 'suggested', NULL, '2025-09-23 11:16:06'),
+(28, 81, 1, 'N', 'เพิ่มไนโตรเจนอย่างรวดเร็ว', NULL, NULL, 'suggested', NULL, '2025-09-23 11:17:17'),
+(29, 81, 3, 'K', 'เพิ่มโพแทสเซียม/คุณภาพผล', NULL, NULL, 'suggested', NULL, '2025-09-23 11:17:17'),
+(30, 82, 2, 'P', 'บูสต์ฟอสฟอรัส/ราก', NULL, NULL, 'suggested', NULL, '2025-09-23 11:20:09'),
+(31, 83, 3, 'K', 'เพิ่มโพแทสเซียม/คุณภาพผล', NULL, NULL, 'suggested', NULL, '2025-09-23 11:22:43'),
+(32, 83, 4, 'Mg', 'ปรับ Mg และค่า pH บางส่วน', NULL, NULL, 'suggested', NULL, '2025-09-23 11:22:43'),
+(33, 84, 4, 'Mg', 'ปรับ Mg และค่า pH บางส่วน', NULL, NULL, 'suggested', NULL, '2025-09-23 11:24:30'),
+(34, 84, 2, 'P', 'บูสต์ฟอสฟอรัส/ราก', NULL, NULL, 'suggested', NULL, '2025-09-23 11:24:30'),
+(35, 85, 1, 'N', 'เพิ่มไนโตรเจนอย่างรวดเร็ว', NULL, NULL, 'suggested', NULL, '2025-09-23 16:11:39');
 
 --
 -- Indexes for dumped tables
@@ -626,7 +529,10 @@ INSERT INTO `zone_inspection_recommendation` (`recommendation_id`, `inspection_i
 -- Indexes for table `fertilizer`
 --
 ALTER TABLE `fertilizer`
-  ADD PRIMARY KEY (`fertilizer_id`);
+  ADD PRIMARY KEY (`id`),
+  ADD UNIQUE KEY `code` (`code`),
+  ADD KEY `idx_fertilizer_active` (`is_active`),
+  ADD KEY `idx_fertilizer_name_th` (`name_th`);
 
 --
 -- Indexes for table `field`
@@ -710,7 +616,9 @@ ALTER TABLE `zone_inspection_recommendation`
   ADD PRIMARY KEY (`recommendation_id`),
   ADD KEY `inspection_id` (`inspection_id`),
   ADD KEY `fertilizer_id` (`fertilizer_id`),
-  ADD KEY `nutrient_code` (`nutrient_code`);
+  ADD KEY `nutrient_code` (`nutrient_code`),
+  ADD KEY `idx_zir_inspection` (`inspection_id`),
+  ADD KEY `idx_zir_nutrient` (`nutrient_code`);
 
 --
 -- AUTO_INCREMENT for dumped tables
@@ -720,13 +628,13 @@ ALTER TABLE `zone_inspection_recommendation`
 -- AUTO_INCREMENT for table `fertilizer`
 --
 ALTER TABLE `fertilizer`
-  MODIFY `fertilizer_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=5;
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=48;
 
 --
 -- AUTO_INCREMENT for table `field`
 --
 ALTER TABLE `field`
-  MODIFY `field_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=15;
+  MODIFY `field_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=16;
 
 --
 -- AUTO_INCREMENT for table `field_point`
@@ -750,47 +658,41 @@ ALTER TABLE `password_reset_tokens`
 -- AUTO_INCREMENT for table `users`
 --
 ALTER TABLE `users`
-  MODIFY `user_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=11;
+  MODIFY `user_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=12;
 
 --
 -- AUTO_INCREMENT for table `zone`
 --
 ALTER TABLE `zone`
-  MODIFY `zone_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=16;
+  MODIFY `zone_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=17;
 
 --
 -- AUTO_INCREMENT for table `zone_inspection`
 --
 ALTER TABLE `zone_inspection`
-  MODIFY `inspection_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=75;
+  MODIFY `inspection_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=92;
 
 --
 -- AUTO_INCREMENT for table `zone_inspection_finding`
 --
 ALTER TABLE `zone_inspection_finding`
-  MODIFY `finding_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=64;
+  MODIFY `finding_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=82;
 
 --
 -- AUTO_INCREMENT for table `zone_inspection_image`
 --
 ALTER TABLE `zone_inspection_image`
-  MODIFY `image_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=70;
+  MODIFY `image_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=127;
 
 --
 -- AUTO_INCREMENT for table `zone_inspection_recommendation`
 --
 ALTER TABLE `zone_inspection_recommendation`
-  MODIFY `recommendation_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=19;
+  MODIFY `recommendation_id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=36;
 
 --
 -- Constraints for dumped tables
 --
-
---
--- Constraints for table `field`
---
-ALTER TABLE `field`
-  ADD CONSTRAINT `field_ibfk_1` FOREIGN KEY (`user_id`) REFERENCES `users` (`user_id`) ON DELETE CASCADE;
 
 --
 -- Constraints for table `field_point`
@@ -829,14 +731,6 @@ ALTER TABLE `zone_inspection_finding`
 --
 ALTER TABLE `zone_inspection_image`
   ADD CONSTRAINT `zone_inspection_image_ibfk_1` FOREIGN KEY (`inspection_id`) REFERENCES `zone_inspection` (`inspection_id`) ON DELETE CASCADE;
-
---
--- Constraints for table `zone_inspection_recommendation`
---
-ALTER TABLE `zone_inspection_recommendation`
-  ADD CONSTRAINT `zone_inspection_recommendation_ibfk_1` FOREIGN KEY (`inspection_id`) REFERENCES `zone_inspection` (`inspection_id`) ON DELETE CASCADE,
-  ADD CONSTRAINT `zone_inspection_recommendation_ibfk_2` FOREIGN KEY (`fertilizer_id`) REFERENCES `fertilizer` (`fertilizer_id`),
-  ADD CONSTRAINT `zone_inspection_recommendation_ibfk_3` FOREIGN KEY (`nutrient_code`) REFERENCES `nutrient_deficiency` (`nutrient_code`);
 COMMIT;
 
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
