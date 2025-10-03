@@ -5,36 +5,28 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 
-# ===== Base routes =====
 from routes.auth import auth_bp
 from routes.field_zone import field_zone_bp
 from routes.password_reset_email import password_reset_email_bp  # ✅ NEW
 
 app = Flask(__name__)
 
-# ==================== CONFIG ====================
 app.config['JWT_SECRET_KEY'] = os.environ.get("JWT_SECRET_KEY", "dev-secret-key")
 JWT_EXPIRY_DAYS = int(os.environ.get("JWT_EXPIRY_DAYS", "30"))
 app.config['JWT_EXPIRY_DAYS'] = JWT_EXPIRY_DAYS
-# จำกัด payload ใหญ่สุด (รวม multipart)
 app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get("MAX_CONTENT_LENGTH_BYTES", str(20 * 1024 * 1024)))
 
-# ===== Absolute paths =====
 APP_ROOT = Path(app.root_path)
-
-# UPLOAD_ROOT (เผยแพร่ให้ blueprint อื่นใช้)
 env_upload = os.environ.get('UPLOAD_ROOT', '').strip()
 UPLOAD_FOLDER = (Path(env_upload) if env_upload else (APP_ROOT / 'static' / 'uploads')).expanduser()
 UPLOAD_FOLDER = UPLOAD_FOLDER.resolve(strict=False)
 UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 os.environ['UPLOAD_ROOT'] = str(UPLOAD_FOLDER)
 
-# Logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 logger.info(f"[BOOT] UPLOAD_ROOT = {UPLOAD_FOLDER}")
 
-# CORS
 CORS(
     app,
     resources={r"/*": {"origins": "*"}},
@@ -44,7 +36,6 @@ CORS(
     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"]
 )
 
-# ==================== OPTIONAL BLUEPRINTS ====================
 inspection_bp = None
 bp_detect = None
 reference_bp = None
@@ -64,14 +55,12 @@ except Exception as e:
     logger.warning(f"⚠️ routes.detect not loaded: {e}")
 
 try:
-    # NOTE: routes/reference.py ควรกำหนด url_prefix="/api/reference" ภายในไฟล์นั้นแล้ว
     from routes.reference import reference_bp as _reference_bp
     reference_bp = _reference_bp
     logger.info("✅ Loaded routes.reference successfully")
 except Exception as e:
     logger.warning(f"⚠️ routes.reference not loaded: {e}")
 
-# ==================== JWT HELPERS ====================
 def generate_token(user_data):
     now = datetime.now(timezone.utc)
     payload = {
@@ -114,7 +103,6 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated
 
-# ==================== MIDDLEWARE ====================
 @app.before_request
 def before_request():
     if request.endpoint in ['static', 'health_check', 'index', 'list_routes']:
@@ -128,10 +116,9 @@ def after_request(response):
         response.data = b''
     return response
 
-# ==================== BLUEPRINTS REGISTRATION ====================
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 app.register_blueprint(field_zone_bp, url_prefix='/api')
-app.register_blueprint(password_reset_email_bp)  # ✅ NEW (ประกาศ path ภายในเป็น /api/auth/*)
+app.register_blueprint(password_reset_email_bp)  # ✅ NEW
 
 if inspection_bp is not None:
     app.register_blueprint(inspection_bp, url_prefix='/api/inspections')
@@ -143,13 +130,10 @@ if bp_detect is not None:
     app.register_blueprint(bp_detect, url_prefix='/api/detect')
     logger.info("✅ Registered bp_detect at /api/detect")
 
-# สำหรับ reference_bp: ใช้ prefix ที่ประกาศใน blueprint เอง (/api/reference)
 if reference_bp is not None:
     app.register_blueprint(reference_bp)
     logger.info("✅ Registered reference_bp at /api/reference")
 
-# ==================== SHIM ALIASES (กันพลาด path เก่า/หลากหลาย client) ====================
-# ผูก alias เฉพาะเมื่อ inspection_bp ถูกโหลด
 if inspection_bp is not None:
     @app.route('/api/reports/history', methods=['GET'])
     @app.route('/api/inspections/history_alias', methods=['GET'])
@@ -160,7 +144,6 @@ if inspection_bp is not None:
                             'message': 'Inspection routes not loaded'}), 404
         return fn()
 
-# ==================== ROUTES ====================
 @app.route('/health', methods=['GET'])
 @cross_origin(origins="*")
 def health_check():
@@ -176,7 +159,7 @@ def health_check():
             'inspection': inspection_bp is not None,
             'detect': bp_detect is not None,
             'reference': reference_bp is not None,
-            'password_reset_email': True,         # ✅ NEW
+            'password_reset_email': True,
         }
     })
 
@@ -188,7 +171,6 @@ def index():
         'authLogin': '/api/auth/login',
         'authRegister': '/api/auth/register',
         'authValidate': '/api/auth/validate',
-        # ===== Password Reset (Email OTP) =====  # ✅ NEW
         'reqPwdReset': '/api/auth/request-password-reset',
         'verifyPwdReset': '/api/auth/verify-reset',
         'doPwdReset': '/api/auth/reset-password',
@@ -244,7 +226,7 @@ def index():
             'inspection': 'loaded' if has_inspection else 'not_loaded',
             'detect': 'loaded' if has_detect else 'not_loaded',
             'reference': 'loaded' if has_reference else 'not_loaded',
-            'password_reset_email': 'loaded',   # ✅ NEW
+            'password_reset_email': 'loaded',
         },
         'notes': 'Model loading & checking are handled in /api/detect/* routes.'
     })
@@ -303,7 +285,6 @@ def get_user_info():
         }
     })
 
-# ==================== ERROR HANDLERS ====================
 @app.errorhandler(400)
 def bad_request(error): return jsonify({'success': False, 'error': 'bad_request', 'message': 'Bad request'}), 400
 @app.errorhandler(401)
@@ -315,7 +296,6 @@ def not_found(error): return jsonify({'success': False, 'error': 'not_found', 'm
 @app.errorhandler(500)
 def internal_error(error): return jsonify({'success': False, 'error': 'server_error', 'message': 'Internal server error'}), 500
 
-# ==================== MAIN ====================
 if __name__ == '__main__':
     logger.info("Starting Flask server with JWT-only authentication...")
     logger.info(f"JWT token expiry: {JWT_EXPIRY_DAYS} days")
