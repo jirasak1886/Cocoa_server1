@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  cocoa-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cocoa-app
+    ports:
+      - "5044:5044"
+    environment:
+      # Database connection to internal MySQL service
+      DB_HOST: db
+      DB_PORT: 3306
+      DB_USER: user1
+      DB_PASS: user123456789 # Use a strong password in production
+      DB_NAME: dbcocoa
+      PORT: 5044
+    env_file:
+      - .env
+    command: ["python", "server.py"]
+    depends_on:
+      - db
+
+  db:
+    image: mysql:8.0
+    container_name: mysql-db
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password # Use a strong password in production
+      MYSQL_DATABASE: dbcocoa
+      MYSQL_USER: user1
+      MYSQL_PASSWORD: user123456789 # Use a strong password in production
+    # ports:
+    #   - "3306:3306" # Expose MySQL port to host for direct access if needed
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./dbcocoa1 (1).sql:/docker-entrypoint-initdb.d/init.sql # Initialize database
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot_password"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin
+    container_name: phpmyadmin-app
+    links:
+      - db:mysql
+    environment:
+      PMA_HOST: db
+      PMA_PORT: 3306
+      MYSQL_ROOT_PASSWORD: root_password # Use the same root password as the db service
+    ports:
+      - "8044:80" # Access phpMyAdmin on http://localhost:8044
+    depends_on:
+      - db
+
+volumes:
+  db_data:

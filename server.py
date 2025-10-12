@@ -4,19 +4,21 @@ import os, logging, jwt
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
+from asgiref.wsgi import WsgiToAsgi # Import WsgiToAsgi
 
 from routes.auth import auth_bp
 from routes.field_zone import field_zone_bp
 from routes.password_reset_email import password_reset_email_bp  # ✅ NEW
 
-app = Flask(__name__)
+wsgi_app = Flask(__name__) # Rename Flask app to wsgi_app
+app = WsgiToAsgi(wsgi_app) # Wrap wsgi_app with WsgiToAsgi for ASGI compatibility
 
-app.config['JWT_SECRET_KEY'] = os.environ.get("JWT_SECRET_KEY", "dev-secret-key")
+wsgi_app.config['JWT_SECRET_KEY'] = os.environ.get("JWT_SECRET_KEY", "dev-secret-key")
 JWT_EXPIRY_DAYS = int(os.environ.get("JWT_EXPIRY_DAYS", "30"))
-app.config['JWT_EXPIRY_DAYS'] = JWT_EXPIRY_DAYS
-app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get("MAX_CONTENT_LENGTH_BYTES", str(20 * 1024 * 1024)))
+wsgi_app.config['JWT_EXPIRY_DAYS'] = JWT_EXPIRY_DAYS
+wsgi_app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get("MAX_CONTENT_LENGTH_BYTES", str(20 * 1024 * 1024)))
 
-APP_ROOT = Path(app.root_path)
+APP_ROOT = Path(wsgi_app.root_path)
 env_upload = os.environ.get('UPLOAD_ROOT', '').strip()
 UPLOAD_FOLDER = (Path(env_upload) if env_upload else (APP_ROOT / 'static' / 'uploads')).expanduser()
 UPLOAD_FOLDER = UPLOAD_FOLDER.resolve(strict=False)
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 logger.info(f"[BOOT] UPLOAD_ROOT = {UPLOAD_FOLDER}")
 
 CORS(
-    app,
+    wsgi_app,
     resources={r"/*": {"origins": "*"}},
     supports_credentials=False,
     allow_headers=["Authorization", "Content-Type", "X-Requested-With", "Accept"],
@@ -70,13 +72,13 @@ def generate_token(user_data):
         'exp': now + timedelta(days=JWT_EXPIRY_DAYS),
         'iat': now
     }
-    token = jwt.encode(payload, app.config['JWT_SECRET_KEY'], algorithm='HS256')
+    token = jwt.encode(payload, wsgi_app.config['JWT_SECRET_KEY'], algorithm='HS256')
     logger.info(f"Token generated for user: {user_data['username']}")
     return token
 
 def verify_token(token):
     try:
-        return jwt.decode(token, app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
+        return jwt.decode(token, wsgi_app.config['JWT_SECRET_KEY'], algorithms=['HS256'])
     except jwt.ExpiredSignatureError:
         logger.warning("Token expired"); return None
     except jwt.InvalidTokenError as e:
@@ -103,40 +105,40 @@ def require_auth(f):
         return f(*args, **kwargs)
     return decorated
 
-@app.before_request
+@wsgi_app.before_request
 def before_request():
     if request.endpoint in ['static', 'health_check', 'index', 'list_routes']:
         return
     logger.debug(f"=== REQUEST {request.method} {request.url} ===")
 
-@app.after_request
+@wsgi_app.after_request
 def after_request(response):
     if request.method == 'OPTIONS':
         response.status_code = 204
         response.data = b''
     return response
 
-app.register_blueprint(auth_bp, url_prefix='/api/auth')
-app.register_blueprint(field_zone_bp, url_prefix='/api')
-app.register_blueprint(password_reset_email_bp)  # ✅ NEW
+wsgi_app.register_blueprint(auth_bp, url_prefix='/api/auth')
+wsgi_app.register_blueprint(field_zone_bp, url_prefix='/api')
+wsgi_app.register_blueprint(password_reset_email_bp)  # ✅ NEW
 
 if inspection_bp is not None:
-    app.register_blueprint(inspection_bp, url_prefix='/api/inspections')
+    wsgi_app.register_blueprint(inspection_bp, url_prefix='/api/inspections')
     logger.info("✅ Registered inspection_bp at /api/inspections")
 else:
     logger.error("❌ inspection_bp is None - routes will not be available!")
 
 if bp_detect is not None:
-    app.register_blueprint(bp_detect, url_prefix='/api/detect')
+    wsgi_app.register_blueprint(bp_detect, url_prefix='/api/detect')
     logger.info("✅ Registered bp_detect at /api/detect")
 
 if reference_bp is not None:
-    app.register_blueprint(reference_bp)
+    wsgi_app.register_blueprint(reference_bp)
     logger.info("✅ Registered reference_bp at /api/reference")
 
 if inspection_bp is not None:
-    @app.route('/api/reports/history', methods=['GET'])
-    @app.route('/api/inspections/history_alias', methods=['GET'])
+    @wsgi_app.route('/api/reports/history', methods=['GET'])
+    @wsgi_app.route('/api/inspections/history_alias', methods=['GET'])
     def _history_alias():
         fn = current_app.view_functions.get('inspection.inspection_history')
         if not fn:
@@ -144,7 +146,7 @@ if inspection_bp is not None:
                             'message': 'Inspection routes not loaded'}), 404
         return fn()
 
-@app.route('/health', methods=['GET'])
+@wsgi_app.route('/health', methods=['GET'])
 @cross_origin(origins="*")
 def health_check():
     return jsonify({
@@ -163,7 +165,7 @@ def health_check():
         }
     })
 
-@app.route('/', methods=['GET'])
+@wsgi_app.route('/', methods=['GET'])
 @cross_origin(origins="*")
 def index():
     endpoints = {
@@ -231,7 +233,7 @@ def index():
         'notes': 'Model loading & checking are handled in /api/detect/* routes.'
     })
 
-@app.route('/api/test/protected', methods=['GET'])
+@wsgi_app.route('/api/test/protected', methods=['GET'])
 @require_auth
 def protected_test():
     user = request.current_user
@@ -247,14 +249,14 @@ def protected_test():
         'token_expires': _ts_to_iso(user['exp'])
     })
 
-@app.route('/routes', methods=['GET'])
+@wsgi_app.route('/routes', methods=['GET'])
 @cross_origin(origins="*")
 def list_routes():
     routes = []
-    for rule in app.url_map.iter_rules():
+    for rule in wsgi_app.url_map.iter_rules():
         if rule.endpoint == 'static':
             continue
-        view_func = app.view_functions.get(rule.endpoint)
+        view_func = wsgi_app.view_functions.get(rule.endpoint)
         protected = (getattr(view_func, '__name__', '') == 'decorated')
         routes.append({
             'endpoint': rule.endpoint,
@@ -264,7 +266,7 @@ def list_routes():
         })
     return jsonify({'routes': routes})
 
-@app.route('/api/user/info', methods=['GET'])
+@wsgi_app.route('/api/user/info', methods=['GET'])
 @require_auth
 def get_user_info():
     user = request.current_user
@@ -285,15 +287,15 @@ def get_user_info():
         }
     })
 
-@app.errorhandler(400)
+@wsgi_app.errorhandler(400)
 def bad_request(error): return jsonify({'success': False, 'error': 'bad_request', 'message': 'Bad request'}), 400
-@app.errorhandler(401)
+@wsgi_app.errorhandler(401)
 def unauthorized_error(error): return jsonify({'success': False, 'error': 'unauthorized', 'message': 'JWT Token required'}), 401
-@app.errorhandler(403)
+@wsgi_app.errorhandler(403)
 def forbidden_error(error): return jsonify({'success': False, 'error': 'forbidden', 'message': 'Access denied'}), 403
-@app.errorhandler(404)
+@wsgi_app.errorhandler(404)
 def not_found(error): return jsonify({'success': False, 'error': 'not_found', 'message': 'Endpoint not found'}), 404
-@app.errorhandler(500)
+@wsgi_app.errorhandler(500)
 def internal_error(error): return jsonify({'success': False, 'error': 'server_error', 'message': 'Internal server error'}), 500
 
 if __name__ == '__main__':
@@ -307,4 +309,4 @@ if __name__ == '__main__':
     logger.info(f"  - reference_bp: {'✅ LOADED (/api/reference)' if reference_bp is not None else '⚠️ NOT LOADED'}")
     logger.info(f"  - password_reset_email: ✅ LOADED")
 
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', '5000')), debug=True, threaded=True, use_reloader=False)
+    wsgi_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', '5044')), debug=True, threaded=True, use_reloader=False)
